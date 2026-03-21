@@ -128,3 +128,18 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Generated data
+data/*.json
+data/**/*.json
+data/image_refs/
+data/*.png
+data/*.jpg
+data/*.jpeg
+data/*.gif
+data/*.mp4
