@@ -1,1 +1,1 @@
-"""Baltic Marketplace LinkedIn AI pipeline package."""
+"""Baltic Marketplace package."""

@@ -1,7 +1,8 @@
 [project]
 name = "baltic-marketplace"
 version = "0.1.0"
-description = "Python environment for LinkedIn AI pipeline"
+description = "Python scaffold for job-market analysis and profile optimization workflows."
+readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
 
