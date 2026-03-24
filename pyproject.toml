@@ -1,13 +1,12 @@
 [project]
-name = "baltic-marketplace"
+name = "vacancy-mirror-chatbot-rag"
 version = "0.1.0"
-description = "Python scaffold for job-market analysis and profile optimization workflows."
+description = "Minimal Python scaffold."
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
-
-[project.scripts]
-baltic-marketplace = "baltic_marketplace.cli:main"
+dependencies = [
+    "sentence-transformers>=3.0.1",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
