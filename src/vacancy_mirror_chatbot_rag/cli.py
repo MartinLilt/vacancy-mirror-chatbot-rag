@@ -87,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="BAAI/bge-small-en-v1.5",
         help="Local embedding model name. Default: BAAI/bge-small-en-v1.5",
     )
+    embeddings_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=32,
+        help="Batch size for local embedding generation. Default: 32",
+    )
     embeddings_parser.set_defaults(func=build_job_embeddings_command)
 
     cluster_parser = subparsers.add_parser(
@@ -198,6 +204,103 @@ def build_parser() -> argparse.ArgumentParser:
     )
     core_parser.set_defaults(func=build_semantic_core_profiles_command)
 
+    pipeline_parser = subparsers.add_parser(
+        "run-full-pipeline",
+        help="Run the full vacancy-mirror pipeline from raw jobs JSON to semantic core profiles.",
+    )
+    pipeline_parser.add_argument(
+        "--raw-input",
+        default="data/web_development_jobs.json",
+        help="Path to raw jobs JSON. Default: data/web_development_jobs.json",
+    )
+    pipeline_parser.add_argument(
+        "--pattern-output-dir",
+        default="data/pattern_jobs",
+        help="Output directory for flat jobs CSV. Default: data/pattern_jobs",
+    )
+    pipeline_parser.add_argument(
+        "--normalized-output-dir",
+        default="data/pattern_normalized_jobs",
+        help="Output directory for normalized jobs CSV. Default: data/pattern_normalized_jobs",
+    )
+    pipeline_parser.add_argument(
+        "--embeddings-output",
+        default="data/job_embeddings.jsonl",
+        help="Output JSONL path for embeddings. Default: data/job_embeddings.jsonl",
+    )
+    pipeline_parser.add_argument(
+        "--clusters-output",
+        default="data/job_clusters.json",
+        help="Output JSON path for clusters. Default: data/job_clusters.json",
+    )
+    pipeline_parser.add_argument(
+        "--profiles-output",
+        default="data/top_demanded_profiles.json",
+        help="Output JSON path for auto-labeled profiles. Default: data/top_demanded_profiles.json",
+    )
+    pipeline_parser.add_argument(
+        "--named-profiles-output",
+        default="data/top_demanded_profiles_named.json",
+        help="Output JSON path for OpenAI-named profiles. Default: data/top_demanded_profiles_named.json",
+    )
+    pipeline_parser.add_argument(
+        "--semantic-core-output",
+        default="data/top_demanded_profiles_semantic_core.json",
+        help="Output JSON path for semantic cores. Default: data/top_demanded_profiles_semantic_core.json",
+    )
+    pipeline_parser.add_argument(
+        "--embedding-model",
+        default="BAAI/bge-small-en-v1.5",
+        help="Local embedding model name. Default: BAAI/bge-small-en-v1.5",
+    )
+    pipeline_parser.add_argument(
+        "--embedding-batch-size",
+        type=int,
+        default=32,
+        help="Batch size for local embedding generation. Default: 32",
+    )
+    pipeline_parser.add_argument(
+        "--naming-model",
+        default="gpt-4.1-mini",
+        help="OpenAI model for naming role profiles. Default: gpt-4.1-mini",
+    )
+    pipeline_parser.add_argument(
+        "--similarity-threshold",
+        type=float,
+        default=0.94,
+        help="Cosine similarity threshold for clustering. Default: 0.94",
+    )
+    pipeline_parser.add_argument(
+        "--min-cluster-size",
+        type=int,
+        default=5,
+        help="Minimum cluster size to keep. Default: 5",
+    )
+    pipeline_parser.add_argument(
+        "--top-clusters",
+        type=int,
+        default=100,
+        help="Maximum number of clusters to save. Default: 100",
+    )
+    pipeline_parser.add_argument(
+        "--top-profiles",
+        type=int,
+        default=0,
+        help="Maximum number of role profiles to save. Use 0 for all. Default: 0",
+    )
+    pipeline_parser.add_argument(
+        "--top-phrases-per-size",
+        type=int,
+        default=15,
+        help="Top phrases to keep for each n-gram size in semantic core output. Default: 15",
+    )
+    pipeline_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild all steps even if the target artifact already exists.",
+    )
+    pipeline_parser.set_defaults(func=run_full_pipeline_command)
+
     return parser
 
 
@@ -277,7 +380,7 @@ def build_job_embeddings_command(args: argparse.Namespace) -> int:
             texts.append(_job_text_for_embedding(item))
 
     service = LocalEmbeddingService(model_name=args.model)
-    embeddings = service.encode(texts)
+    embeddings = service.encode(texts, batch_size=args.batch_size)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -579,6 +682,101 @@ def build_semantic_core_profiles_command(args: argparse.Namespace) -> int:
 
     print(f"Semantic cores built: {len(semantic_profiles)}")
     print(f"Saved semantic core JSON: {output_path}")
+    return 0
+
+
+def run_full_pipeline_command(args: argparse.Namespace) -> int:
+    pattern_csv_path = Path(args.pattern_output_dir) / "jobs.csv"
+    normalized_csv_path = Path(args.normalized_output_dir) / "jobs.csv"
+
+    steps: list[tuple[str, object, argparse.Namespace, Path]] = [
+        (
+            "build-job-pattern-csv",
+            build_job_pattern_csv_command,
+            argparse.Namespace(
+                input=args.raw_input,
+                output_dir=args.pattern_output_dir,
+                output_name="jobs.csv",
+            ),
+            pattern_csv_path,
+        ),
+        (
+            "normalize-job-pattern-csv",
+            normalize_job_pattern_csv_command,
+            argparse.Namespace(
+                input=str(pattern_csv_path),
+                output_dir=args.normalized_output_dir,
+                output_name="jobs.csv",
+            ),
+            normalized_csv_path,
+        ),
+        (
+            "build-job-embeddings",
+            build_job_embeddings_command,
+            argparse.Namespace(
+                input=str(normalized_csv_path),
+                output=args.embeddings_output,
+                model=args.embedding_model,
+                batch_size=args.embedding_batch_size,
+            ),
+            Path(args.embeddings_output),
+        ),
+        (
+            "cluster-job-embeddings",
+            cluster_job_embeddings_command,
+            argparse.Namespace(
+                input=args.embeddings_output,
+                output=args.clusters_output,
+                similarity_threshold=args.similarity_threshold,
+                min_cluster_size=args.min_cluster_size,
+                top_clusters=args.top_clusters,
+            ),
+            Path(args.clusters_output),
+        ),
+        (
+            "build-top-demanded-profiles",
+            build_top_demanded_profiles_command,
+            argparse.Namespace(
+                clusters_input=args.clusters_output,
+                jobs_input=str(pattern_csv_path),
+                output=args.profiles_output,
+                top_profiles=args.top_profiles,
+            ),
+            Path(args.profiles_output),
+        ),
+        (
+            "name-top-demanded-profiles",
+            name_top_demanded_profiles_command,
+            argparse.Namespace(
+                input=args.profiles_output,
+                output=args.named_profiles_output,
+                model=args.naming_model,
+            ),
+            Path(args.named_profiles_output),
+        ),
+        (
+            "build-semantic-core-profiles",
+            build_semantic_core_profiles_command,
+            argparse.Namespace(
+                profiles_input=args.named_profiles_output,
+                jobs_input=str(pattern_csv_path),
+                output=args.semantic_core_output,
+                top_phrases_per_size=args.top_phrases_per_size,
+            ),
+            Path(args.semantic_core_output),
+        ),
+    ]
+
+    print("Running full pipeline...")
+    for step_name, handler, step_args, target_path in steps:
+        if target_path.exists() and not args.force:
+            print(f"[pipeline] {step_name} -> skip ({target_path} already exists)")
+            continue
+        print(f"[pipeline] {step_name}")
+        handler(step_args)
+
+    print("Full pipeline completed.")
+    print(f"Final semantic core JSON: {args.semantic_core_output}")
     return 0
 
 
