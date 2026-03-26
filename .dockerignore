@@ -1,0 +1,35 @@
+# Python
+
+.venv/
+**pycache**/
+_.pyc
+_.pyo
+\*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Data — mounted as a Hetzner Volume at /data, not baked into image
+
+data/
+
+# Scripts and experiments — not needed in production image
+
+scripts/
+
+# Editor and OS
+
+.DS_Store
+.idea/
+.vscode/
+\*.swp
+
+# Git
+
+.git/
+.github/
+
+# Env files — secrets are passed via environment variables at runtime
+
+.env
+.env.\*
