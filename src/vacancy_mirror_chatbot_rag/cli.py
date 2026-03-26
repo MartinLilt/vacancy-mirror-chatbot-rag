@@ -320,7 +320,7 @@ def build_job_pattern_csv_command(args: argparse.Namespace) -> int:
                 "jobid": _job_identifier(item),
                 "title": _string_field(item.get("title")),
                 "desc": _string_field(item.get("description")),
-                "skills": _skills_field(item.get("skills")),
+                "skills": _extract_skills(item),
             }
         )
 
@@ -403,7 +403,8 @@ def build_job_embeddings_command(args: argparse.Namespace) -> int:
 
 def cluster_job_embeddings_command(args: argparse.Namespace) -> int:
     if not 0 <= args.similarity_threshold <= 1:
-        raise SystemExit("similarity-threshold должен быть в диапазоне от 0 до 1.")
+        raise SystemExit(
+            "similarity-threshold должен быть в диапазоне от 0 до 1.")
     if args.min_cluster_size < 1:
         raise SystemExit("min-cluster-size должен быть больше 0.")
     if args.top_clusters < 1:
@@ -437,25 +438,60 @@ def cluster_job_embeddings_command(args: argparse.Namespace) -> int:
 
     components = _connected_components(adjacency, len(items))
 
+    # Soft threshold for counting all matching jobs per cluster centroid.
+    # Uses a wider radius so we capture jobs that are semantically related
+    # but not identical enough to be in the core cluster.
+    soft_threshold = max(0.0, args.similarity_threshold - 0.10)
+
     clusters: list[dict[str, object]] = []
     for cluster_id, component in enumerate(components, start=1):
         if len(component) < args.min_cluster_size:
             continue
         cluster_items = [items[index] for index in component]
-        top_title_terms = _top_terms([item["title"] for item in cluster_items], top_n=10)
-        top_skill_terms = _top_terms([item["skills"] for item in cluster_items], top_n=10)
+
+        # Compute centroid as mean of normalised embeddings.
+        centroid = np.mean(
+            [items[i]["embedding"] for i in component], axis=0
+        ).astype(np.float32)
+        centroid /= np.linalg.norm(centroid) + 1e-10
+
+        # Count ALL corpus jobs whose cosine similarity to centroid
+        # exceeds soft_threshold — this is the real market demand size.
+        sims = matrix @ centroid  # cosine similarity (embeddings normalised)
+        matching_indices = [
+            int(idx)
+            for idx, sim in enumerate(sims)
+            if float(sim) >= soft_threshold
+        ]
+
+        top_title_terms = _top_terms(
+            [item["title"] for item in cluster_items], top_n=10
+        )
+        top_skill_terms = _top_terms(
+            [item["skills"] for item in cluster_items], top_n=10
+        )
         clusters.append(
             {
                 "cluster_id": cluster_id,
                 "size": len(component),
+                "total_matching": len(matching_indices),
                 "job_ids": [item["jobid"] for item in cluster_items],
-                "sample_titles": [item["title"] for item in cluster_items[:5]],
+                "all_matching_job_ids": [
+                    items[i]["jobid"] for i in matching_indices
+                ],
+                "sample_titles": [
+                    item["title"] for item in cluster_items[:5]
+                ],
                 "top_title_terms": top_title_terms,
                 "top_skill_terms": top_skill_terms,
             }
         )
 
-    clusters.sort(key=lambda item: (-int(item["size"]), int(item["cluster_id"])))
+    clusters.sort(
+        key=lambda item: (
+            -int(item["total_matching"]), int(item["cluster_id"])
+        )
+    )
     clusters = clusters[: args.top_clusters]
 
     output_path = Path(args.output)
@@ -499,24 +535,32 @@ def build_top_demanded_profiles_command(args: argparse.Namespace) -> int:
     jobs_by_id = _load_jobs_csv_by_id(jobs_path)
 
     profiles: list[dict[str, object]] = []
-    selected_clusters = raw_clusters if args.top_profiles == 0 else raw_clusters[: args.top_profiles]
+    selected_clusters = raw_clusters if args.top_profiles == 0 else raw_clusters[
+        : args.top_profiles]
     for cluster in selected_clusters:
         job_ids = cluster.get("job_ids", [])
         if not isinstance(job_ids, list):
             continue
-        cluster_jobs = [jobs_by_id[job_id] for job_id in job_ids if job_id in jobs_by_id]
+        cluster_jobs = [jobs_by_id[job_id]
+                        for job_id in job_ids if job_id in jobs_by_id]
         if not cluster_jobs:
             continue
 
-        top_title_terms = _top_terms([job["title"] for job in cluster_jobs], top_n=15)
-        top_description_terms = _top_terms([job["desc"] for job in cluster_jobs], top_n=15)
-        top_skill_phrases = _top_skill_phrases([job["skills"] for job in cluster_jobs], top_n=15)
+        top_title_terms = _top_terms([job["title"]
+                                     for job in cluster_jobs], top_n=15)
+        top_description_terms = _top_terms(
+            [job["desc"] for job in cluster_jobs], top_n=15)
+        top_skill_phrases = _top_skill_phrases(
+            [job["skills"] for job in cluster_jobs], top_n=15)
 
         profiles.append(
             {
                 "cluster_id": cluster.get("cluster_id"),
                 "role_name": _role_label_from_terms(top_title_terms),
                 "size": len(cluster_jobs),
+                "total_matching": cluster.get(
+                    "total_matching", len(cluster_jobs)
+                ),
                 "job_ids": [job["jobid"] for job in cluster_jobs],
                 "sample_titles": [job["title"] for job in cluster_jobs[:10]],
                 "top_title_terms": top_title_terms,
@@ -554,7 +598,8 @@ def name_top_demanded_profiles_command(args: argparse.Namespace) -> int:
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     profiles = payload.get("profiles", [])
     if not isinstance(profiles, list) or not profiles:
-        raise SystemExit("В top demanded profiles JSON нет корректного списка profiles.")
+        raise SystemExit(
+            "В top demanded profiles JSON нет корректного списка profiles.")
 
     naming_input: list[dict[str, object]] = []
     for profile in profiles:
@@ -573,7 +618,8 @@ def name_top_demanded_profiles_command(args: argparse.Namespace) -> int:
     naming_result = service.name_profiles(profiles=naming_input)
     llm_profiles = naming_result.get("profiles", [])
     if not isinstance(llm_profiles, list):
-        raise SystemExit("LLM naming response does not contain a valid profiles list.")
+        raise SystemExit(
+            "LLM naming response does not contain a valid profiles list.")
 
     llm_by_cluster_id = {
         str(item.get("cluster_id")): item
@@ -587,7 +633,8 @@ def name_top_demanded_profiles_command(args: argparse.Namespace) -> int:
         llm_item = llm_by_cluster_id.get(cluster_id, {})
         named_profile = dict(profile)
         named_profile["auto_role_name"] = profile.get("role_name")
-        named_profile["role_name"] = llm_item.get("role_name", profile.get("role_name"))
+        named_profile["role_name"] = llm_item.get(
+            "role_name", profile.get("role_name"))
         named_profile["role_name_reason"] = llm_item.get("reason", "")
         named_profiles.append(named_profile)
 
@@ -625,7 +672,8 @@ def build_semantic_core_profiles_command(args: argparse.Namespace) -> int:
     payload = json.loads(profiles_path.read_text(encoding="utf-8"))
     profiles = payload.get("profiles", [])
     if not isinstance(profiles, list) or not profiles:
-        raise SystemExit("В named profiles JSON нет корректного списка profiles.")
+        raise SystemExit(
+            "В named profiles JSON нет корректного списка profiles.")
 
     jobs_by_id = _load_jobs_csv_by_id(jobs_path)
     semantic_profiles: list[dict[str, object]] = []
@@ -634,7 +682,8 @@ def build_semantic_core_profiles_command(args: argparse.Namespace) -> int:
         job_ids = profile.get("job_ids", [])
         if not isinstance(job_ids, list):
             continue
-        jobs = [jobs_by_id[job_id] for job_id in job_ids if job_id in jobs_by_id]
+        jobs = [jobs_by_id[job_id]
+                for job_id in job_ids if job_id in jobs_by_id]
         if not jobs:
             continue
 
@@ -770,7 +819,8 @@ def run_full_pipeline_command(args: argparse.Namespace) -> int:
     print("Running full pipeline...")
     for step_name, handler, step_args, target_path in steps:
         if target_path.exists() and not args.force:
-            print(f"[pipeline] {step_name} -> skip ({target_path} already exists)")
+            print(
+                f"[pipeline] {step_name} -> skip ({target_path} already exists)")
             continue
         print(f"[pipeline] {step_name}")
         handler(step_args)
@@ -941,7 +991,8 @@ def _load_items(path: Path) -> list[dict]:
     elif isinstance(payload, dict):
         items = payload.get("items", [])
     else:
-        raise SystemExit("JSON должен быть либо списком вакансий, либо объектом с полем items.")
+        raise SystemExit(
+            "JSON должен быть либо списком вакансий, либо объектом с полем items.")
 
     if not isinstance(items, list):
         raise SystemExit("В JSON нет корректного списка items.")
@@ -974,6 +1025,29 @@ def _skills_field(value: object) -> str:
     return " | ".join(cleaned)
 
 
+def _extract_skills(item: dict) -> str:
+    """Extract skills from a job dict.
+
+    Supports two formats:
+    - ``skills``: list of plain strings (old web_development_jobs format).
+    - ``attrs``: list of dicts with ``prefLabel`` key (new scraper format).
+    """
+    skills_raw = item.get("skills")
+    if isinstance(skills_raw, list) and skills_raw:
+        return _skills_field(skills_raw)
+
+    attrs = item.get("attrs")
+    if isinstance(attrs, list):
+        labels = [
+            str(a.get("prefLabel", "")).strip()
+            for a in attrs
+            if isinstance(a, dict) and a.get("prefLabel")
+        ]
+        return " | ".join(labels)
+
+    return ""
+
+
 def _normalize_text(value: str) -> str:
     value = value.lower()
     value = re.sub(r"[^a-z0-9\s]", " ", value)
@@ -988,7 +1062,11 @@ def _cleanup_legacy_pattern_files(*, output_dir: Path, keep: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+def _write_csv(
+    path: Path,
+    fieldnames: list[str],
+    rows: list[dict[str, str]],
+) -> None:
     with path.open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
