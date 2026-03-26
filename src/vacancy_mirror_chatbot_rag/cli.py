@@ -32,8 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pattern_parser.add_argument(
         "--input",
-        default="data/web_development_jobs.json",
-        help="Path to source JSON file. Default: data/web_development_jobs.json",
+        default="data/raw/ai_apps_and_integration.json",
+        help="Path to source JSON file.",
     )
     pattern_parser.add_argument(
         "--output-dir",
@@ -210,8 +210,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pipeline_parser.add_argument(
         "--raw-input",
-        default="data/web_development_jobs.json",
-        help="Path to raw jobs JSON. Default: data/web_development_jobs.json",
+        default="data/raw/ai_apps_and_integration.json",
+        help="Path to raw jobs JSON.",
     )
     pipeline_parser.add_argument(
         "--pattern-output-dir",
@@ -553,14 +553,19 @@ def build_top_demanded_profiles_command(args: argparse.Namespace) -> int:
         top_skill_phrases = _top_skill_phrases(
             [job["skills"] for job in cluster_jobs], top_n=15)
 
+        size = len(cluster_jobs)
+        total_matching = int(
+            cluster.get("total_matching", size)
+        )
+        demand_ratio = round(total_matching / size, 2) if size else 0.0
         profiles.append(
             {
                 "cluster_id": cluster.get("cluster_id"),
                 "role_name": _role_label_from_terms(top_title_terms),
-                "size": len(cluster_jobs),
-                "total_matching": cluster.get(
-                    "total_matching", len(cluster_jobs)
-                ),
+                "size": size,
+                "total_matching": total_matching,
+                "demand_ratio": demand_ratio,
+                "demand_type": _demand_type(demand_ratio),
                 "job_ids": [job["jobid"] for job in cluster_jobs],
                 "sample_titles": [job["title"] for job in cluster_jobs[:10]],
                 "top_title_terms": top_title_terms,
@@ -828,6 +833,20 @@ def run_full_pipeline_command(args: argparse.Namespace) -> int:
     print("Full pipeline completed.")
     print(f"Final semantic core JSON: {args.semantic_core_output}")
     return 0
+
+
+def _demand_type(ratio: float) -> str:
+    """Classify market demand based on total_matching / size ratio.
+
+    - broad:  ratio > 5  — wide market, diverse job postings.
+    - niche:  ratio 1.5–5 — focused market, similar postings.
+    - exotic: ratio < 1.5 — rare or very specific topic.
+    """
+    if ratio > 5.0:
+        return "broad"
+    if ratio >= 1.5:
+        return "niche"
+    return "exotic"
 
 
 def _connected_components(adjacency: dict[int, set[int]], total_nodes: int) -> list[list[int]]:
