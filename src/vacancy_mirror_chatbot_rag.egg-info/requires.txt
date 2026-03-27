@@ -1,1 +1,4 @@
 sentence-transformers>=3.0.1
+playwright>=1.40.0
+fake-useragent>=1.5.0
+psycopg2-binary>=2.9

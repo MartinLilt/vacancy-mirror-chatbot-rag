@@ -1,6 +1,7 @@
 README.md
 pyproject.toml
 src/vacancy_mirror_chatbot_rag/__init__.py
+src/vacancy_mirror_chatbot_rag/categories.py
 src/vacancy_mirror_chatbot_rag/cli.py
 src/vacancy_mirror_chatbot_rag.egg-info/PKG-INFO
 src/vacancy_mirror_chatbot_rag.egg-info/SOURCES.txt
@@ -9,3 +10,6 @@ src/vacancy_mirror_chatbot_rag.egg-info/requires.txt
 src/vacancy_mirror_chatbot_rag.egg-info/top_level.txt
 src/vacancy_mirror_chatbot_rag/services/__init__.py
 src/vacancy_mirror_chatbot_rag/services/embeddings.py
+src/vacancy_mirror_chatbot_rag/services/openai.py
+src/vacancy_mirror_chatbot_rag/services/postgres.py
+src/vacancy_mirror_chatbot_rag/services/upwork_scraper.py

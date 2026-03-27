@@ -1,42 +1,6 @@
-# ---------------------------------------------------------------------------
-# vacancy-mirror-chatbot-rag — full stack
-#
-# Services:
-#   postgres      — PostgreSQL 16 + pgvector (vector + relational storage)
-#   scraper-*     — one container per Upwork parent category
-#
-# Usage:
-#   docker compose up postgres          # start DB only
-#   docker compose run scraper-webdev   # run one scraper manually
-#   docker compose up                   # start everything
-#
-# Secrets — copy .env.example to .env and fill in values before running.
-# ---------------------------------------------------------------------------
-
-x-scraper-base: &scraper-base
-  build: .
-  restart: "no" # scrapers run via cron, not as long-running services
-  volumes:
-    - scraper-data:/data
-  environment:
-    DATA_DIR: /data
-    OPENAI_API_KEY: ${OPENAI_API_KEY}
-    OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
-    DB_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
-  depends_on:
-    postgres:
-      condition: service_healthy
-  # Default command: run full pipeline for the configured category.
-  # Override at runtime: docker compose run scraper-webdev python -m ...
-  command: >
-    python -m vacancy_mirror_chatbot_rag.cli run-full-pipeline
-      --embedding-model BAAI/bge-large-en-v1.5
-      --similarity-threshold 0.90
+version: "3.9"
 
 services:
-  # -------------------------------------------------------------------------
-  # Database
-  # -------------------------------------------------------------------------
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
@@ -55,127 +19,24 @@ services:
       timeout: 5s
       retries: 5
 
-  # -------------------------------------------------------------------------
-  # Scrapers — one per Upwork parent category
-  # Each uses a separate residential proxy IP via PROXY_URL env var.
-  # Stagger start times in production with cron (see README).
-  # -------------------------------------------------------------------------
-
   scraper-webdev:
-    <<: *scraper-base
+    build: .
     container_name: scraper-webdev
+    restart: "no"
+    volumes:
+      - scraper-data:/data
     environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282580668418" # Web, Mobile & Software Dev
-      PROXY_URL: ${PROXY_URL_WEBDEV}
-      RAW_OUTPUT: /data/raw/web_mobile_software_dev.json
+      DATA_DIR: /data
+      CATEGORY_UID: "531770282580668418"
+      PROXY_URL: ${PROXY_URL_WEBDEV:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      DB_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m vacancy_mirror_chatbot_rag.cli import-raw-to-db
 
-  scraper-design:
-    <<: *scraper-base
-    container_name: scraper-design
-    environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282580668421" # Design & Creative
-      PROXY_URL: ${PROXY_URL_DESIGN}
-      RAW_OUTPUT: /data/raw/design_creative.json
-
-  scraper-engineering:
-    <<: *scraper-base
-    container_name: scraper-engineering
-    environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282584862722" # Engineering & Architecture
-      PROXY_URL: ${PROXY_URL_ENGINEERING}
-      RAW_OUTPUT: /data/raw/engineering_architecture.json
-
-  scraper-it:
-    <<: *scraper-base
-    container_name: scraper-it
-    environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282580668419" # IT & Networking
-      PROXY_URL: ${PROXY_URL_IT}
-      RAW_OUTPUT: /data/raw/it_networking.json
-
-  scraper-datascience:
-    <<: *scraper-base
-    container_name: scraper-datascience
-    environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282580668420" # Data Science & Analytics
-      PROXY_URL: ${PROXY_URL_DATASCIENCE}
-      RAW_OUTPUT: /data/raw/data_science_analytics.json
-
-  scraper-sales:
-    <<: *scraper-base
-    container_name: scraper-sales
-    environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282580668422" # Sales & Marketing
-      PROXY_URL: ${PROXY_URL_SALES}
-      RAW_OUTPUT: /data/raw/sales_marketing.json
-
-  scraper-writing:
-    <<: *scraper-base
-    container_name: scraper-writing
-    environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282580668423" # Writing
-      PROXY_URL: ${PROXY_URL_WRITING}
-      RAW_OUTPUT: /data/raw/writing.json
-
-  scraper-admin:
-    <<: *scraper-base
-    container_name: scraper-admin
-    environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282580668416" # Admin Support
-      PROXY_URL: ${PROXY_URL_ADMIN}
-      RAW_OUTPUT: /data/raw/admin_support.json
-
-  scraper-accounting:
-    <<: *scraper-base
-    container_name: scraper-accounting
-    environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282584862721" # Accounting & Consulting
-      PROXY_URL: ${PROXY_URL_ACCOUNTING}
-      RAW_OUTPUT: /data/raw/accounting_consulting.json
-
-  scraper-customer:
-    <<: *scraper-base
-    container_name: scraper-customer
-    environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282580668417" # Customer Service
-      PROXY_URL: ${PROXY_URL_CUSTOMER}
-      RAW_OUTPUT: /data/raw/customer_service.json
-
-  scraper-legal:
-    <<: *scraper-base
-    container_name: scraper-legal
-    environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282584862723" # Legal
-      PROXY_URL: ${PROXY_URL_LEGAL}
-      RAW_OUTPUT: /data/raw/legal.json
-
-  scraper-translation:
-    <<: *scraper-base
-    container_name: scraper-translation
-    environment:
-      <<: *scraper-base
-      CATEGORY_UID: "531770282584862720" # Translation
-      PROXY_URL: ${PROXY_URL_TRANSLATION}
-      RAW_OUTPUT: /data/raw/translation.json
-
-# ---------------------------------------------------------------------------
-# Volumes
-# ---------------------------------------------------------------------------
 volumes:
   postgres-data:
-    driver: local
   scraper-data:
-    driver: local
-    # On Hetzner: replace with a named Hetzner Volume mount via
-    # driver_opts: { type: none, o: bind, device: /mnt/hetzner-volume }
