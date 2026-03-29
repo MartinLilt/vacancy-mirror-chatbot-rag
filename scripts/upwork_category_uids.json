@@ -1,78 +1,50 @@
 {
-  "All - Accounting & Consulting": "531770282584862721",
-  "Personal & Professional Coaching": "531770282584862721",
-  "Accounting & Bookkeeping": "531770282584862721",
-  "Financial Planning": "531770282584862721",
-  "Recruiting & Human Resources": "531770282584862721",
-  "Management Consulting & Analysis": "531770282584862721",
-  "Other - Accounting & Consulting": "531770282584862721",
-  "All - Admin Support": "531770282580668416",
-  "Data Entry & Transcription Services": "531770282580668416",
-  "Virtual Assistance": "531770282580668416",
-  "Project Management": "531770282580668416",
-  "Market Research & Product Reviews": "531770282580668416",
-  "All - Customer Service": "531770282580668417",
-  "Community Management & Tagging": "531770282580668417",
-  "Customer Service & Tech Support": "531770282580668417",
-  "All - Data Science & Analytics": "531770282580668420",
-  "Data Analysis & Testing": "531770282580668420",
-  "Data Extraction/ETL": "531770282580668420",
-  "Data Mining & Management": "531770282580668420",
-  "AI & Machine Learning": "531770282580668420",
-  "All - Design & Creative": "531770282580668421",
-  "Art & Illustration": "531770282580668421",
-  "Audio & Music Production": "531770282580668421",
-  "Branding & Logo Design": "531770282580668421",
-  "NFT, AR/VR & Game Art": "531770282580668421",
-  "Graphic, Editorial & Presentation Design": "531770282580668421",
-  "Performing Arts": "531770282580668421",
-  "Photography": "531770282580668421",
-  "Product Design": "531770282580668421",
-  "Video & Animation": "531770282580668421",
-  "All - Engineering & Architecture": "531770282584862722",
-  "Building & Landscape Architecture": "531770282584862722",
-  "Chemical Engineering": "531770282584862722",
-  "Civil & Structural Engineering": "531770282584862722",
-  "Contract Manufacturing": "531770282584862722",
-  "Electrical & Electronic Engineering": "531770282584862722",
-  "Interior & Trade Show Design": "531770282584862722",
-  "Energy & Mechanical Engineering": "531770282584862722",
-  "Physical Sciences": "531770282584862722",
-  "3D Modeling & CAD": "531770282584862722",
-  "All - IT & Networking": "531770282580668419",
-  "Database Management & Administration": "531770282580668419",
-  "ERP/CRM Software": "531770282580668419",
-  "Information Security & Compliance": "531770282580668419",
-  "Network & System Administration": "531770282580668419",
-  "DevOps & Solution Architecture": "531770282580668419",
-  "All - Legal": "531770282584862723",
-  "Corporate & Contract Law": "531770282584862723",
-  "International & Immigration Law": "531770282584862723",
-  "Finance & Tax Law": "531770282584862723",
-  "Public Law": "531770282584862723",
-  "All - Sales & Marketing": "531770282580668422",
-  "Digital Marketing": "531770282580668422",
-  "Lead Generation & Telemarketing": "531770282580668422",
-  "Marketing, PR & Brand Strategy": "531770282580668422",
-  "All - Translation": "531770282584862720",
-  "Language Tutoring & Interpretation": "531770282584862720",
-  "Translation & Localization Services": "531770282584862720",
-  "All - Web, Mobile & Software Dev": "531770282580668418",
-  "Blockchain, NFT & Cryptocurrency": "531770282580668418",
-  "AI Apps & Integration": "531770282580668418",
-  "Desktop Application Development": "531770282580668418",
-  "Ecommerce Development": "531770282580668418",
-  "Game Design & Development": "531770282580668418",
-  "Mobile Development": "531770282580668418",
-  "Other - Software Development": "531770282580668418",
-  "Product Management & Scrum": "531770282580668418",
-  "QA Testing": "531770282580668418",
-  "Scripts & Utilities": "531770282580668418",
-  "Web & Mobile Design": "531770282580668418",
-  "Web Development": "531770282580668418",
-  "All - Writing": "531770282580668423",
-  "Sales & Marketing Copywriting": "531770282580668423",
-  "Content Writing": "531770282580668423",
-  "Editing & Proofreading Services": "531770282580668423",
-  "Professional & Business Writing": "531770282580668423"
+  "Accounting & Consulting": {
+    "uid": "531770282584862721",
+    "total_jobs": 7809
+  },
+  "Admin Support": {
+    "uid": "531770282580668416",
+    "total_jobs": 12648
+  },
+  "Customer Service": {
+    "uid": "531770282580668417",
+    "total_jobs": 3233
+  },
+  "Data Science & Analytics": {
+    "uid": "531770282580668420",
+    "total_jobs": 4290
+  },
+  "Design & Creative": {
+    "uid": "531770282580668421",
+    "total_jobs": 40764
+  },
+  "Engineering & Architecture": {
+    "uid": "531770282584862722",
+    "total_jobs": 7209
+  },
+  "IT & Networking": {
+    "uid": "531770282580668419",
+    "total_jobs": 3072
+  },
+  "Legal": {
+    "uid": "531770282584862723",
+    "total_jobs": 2167
+  },
+  "Sales & Marketing": {
+    "uid": "531770282580668422",
+    "total_jobs": 32043
+  },
+  "Translation": {
+    "uid": "531770282584862720",
+    "total_jobs": 2070
+  },
+  "Web, Mobile & Software Dev": {
+    "uid": "531770282580668418",
+    "total_jobs": 31929
+  },
+  "Writing": {
+    "uid": "531770282580668423",
+    "total_jobs": 4969
+  }
 }

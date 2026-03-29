@@ -19,24 +19,32 @@ services:
       timeout: 5s
       retries: 5
 
-  scraper-webdev:
-    build: .
-    container_name: scraper-webdev
-    restart: "no"
-    volumes:
-      - scraper-data:/data
+  backend:
+    build: ./backend
+    container_name: backend
+    restart: unless-stopped
     environment:
-      DATA_DIR: /data
-      CATEGORY_UID: "531770282580668418"
-      PROXY_URL: ${PROXY_URL_WEBDEV:-}
+      DB_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
-      DB_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
-    command: python -m vacancy_mirror_chatbot_rag.cli import-raw-to-db
+    command: python -m backend.cli telegram-bot
+
+  scraper:
+    build: ./scraper
+    container_name: scraper
+    restart: "no"
+    environment:
+      DB_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
+      PROXY_URL: ${PROXY_URL:-}
+      CATEGORY_UID: ${CATEGORY_UID:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m scraper.cli
 
 volumes:
   postgres-data:
-  scraper-data:

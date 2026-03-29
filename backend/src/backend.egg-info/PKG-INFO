@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: backend
+Version: 0.1.0
+Summary: Vacancy Mirror backend — NLP pipeline, AI, Telegram bot, API.
+Requires-Python: >=3.13
+Requires-Dist: sentence-transformers>=3.0.1
+Requires-Dist: scikit-learn>=1.3.2
+Requires-Dist: numpy>=1.24.3
+Requires-Dist: psycopg2-binary>=2.9
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: python-telegram-bot>=21.0
+Requires-Dist: httpx>=0.27

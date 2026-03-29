@@ -1,24 +1,204 @@
 # Vacancy Mirror RAG Pipeline — Hetzner Deployment Specification
 
 **Дата создания:** 27 March 2026  
-**Версия:** 1.0  
+**Версия:** 2.0  
 **Язык:** English (для ChatGPT)
 
 ---
 
 ## 📋 SYSTEM OVERVIEW
 
-The Vacancy Mirror RAG Pipeline is a production-grade data pipeline that:
+The Vacancy Mirror RAG Pipeline is a distributed data pipeline deployed
+across two types of containers on Hetzner Cloud:
 
-- **Scrapes** Upwork job vacancies using headless Chrome (anti-bot protection)
-- **Processes** raw job data through NLP normalization and pattern extraction
-- **Generates** semantic embeddings using BAAI/bge-large-en-v1.5 (1024-dim)
-- **Clusters** similar jobs using scikit-learn's NearestNeighbors algorithm
-- **Profiles** demand patterns and names them using OpenAI GPT-4-mini
-- **Stores** all data in PostgreSQL with pgvector for semantic search
+1. **Scraper containers** — headless Chrome + nodriver, one or more
+   instances depending on category load level (L1–L4)
+2. **Backend container** — all business logic, AI/ML, API and bot layers
 
-**Runtime:** 7-stage pipeline, executes in ~3.5-4 hours for fresh data  
-**Frequency:** Daily (configurable via cron)
+The system scrapes Upwork job vacancies, processes them through
+NLP normalization, embedding, clustering and AI profiling, and serves
+results to users via a Telegram bot.
+
+**Runtime:** continuous (scrapers run on schedule, backend is always-on)  
+**Frequency:** weekly full scrape cycle per category
+
+---
+
+## 🏗️ TWO-CONTAINER ARCHITECTURE
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        HETZNER CLOUD                            │
+│                                                                 │
+│  ┌──────────────────┐        ┌──────────────────┐              │
+│  │  SCRAPER NODE    │        │  SCRAPER NODE     │  (L4 only)  │
+│  │  CPX11 (~€5/mo)  │        │  CPX11 (~€5/mo)  │             │
+│  │                  │        │                  │              │
+│  │  [scraper]       │        │  [scraper]        │             │
+│  │  container       │        │  container        │             │
+│  └────────┬─────────┘        └────────┬──────────┘             │
+│           │  Private Network (10.0.0.x)│                        │
+│           └──────────────┬────────────┘                        │
+│                          │                                      │
+│  ┌───────────────────────▼─────────────────────────────────┐   │
+│  │                  BACKEND NODE  CPX32 (~€9/mo)            │   │
+│  │                                                          │   │
+│  │  ┌──────────────────────────────────────────────────┐   │   │
+│  │  │               [backend] container                │   │   │
+│  │  │                                                  │   │   │
+│  │  │  1. micro-scraper     — category load table      │   │   │
+│  │  │  2. progress DB       — receives scraper results │   │   │
+│  │  │  3. normalizer        — NLP + embedding layer    │   │   │
+│  │  │  4. clustering        — semantic cores           │   │   │
+│  │  │  5. AI assistant      — OpenAI orchestrator      │   │   │
+│  │  │  6. Telegram bot      — user-facing chat         │   │   │
+│  │  │  7. business logic    — API + coordination       │   │   │
+│  │  └──────────────────────────────────────────────────┘   │   │
+│  │                                                          │   │
+│  │  ┌─────────────────────────────────────────────────┐    │   │
+│  │  │           [postgres] container                   │    │   │
+│  │  │           pgvector/pgvector:pg16                 │    │   │
+│  │  └─────────────────────────────────────────────────┘    │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📦 CONTAINER 1: SCRAPER
+
+### Purpose
+
+Runs headless Chrome via `nodriver` to scrape Upwork vacancies.
+Stateless — can be spun up/down on demand or scaled horizontally for
+Level 4 categories.
+
+### Scaling rules (by category load level)
+
+| Level | total_jobs | Strategy                             | Replicas |
+| ----- | ---------- | ------------------------------------ | -------- |
+| 🟢 L1 | ≤ 2,500    | max_pages=50, single pass            | 1        |
+| 🟡 L2 | ≤ 5,000    | max_pages=100, single pass           | 1        |
+| 🟠 L3 | ≤ 25,000   | max_pages=100 + URL filter splits    | 1        |
+| 🔴 L4 | > 25,000   | max_pages=100 + splits + k8s replica | **2**    |
+
+**Current category classification:**
+
+```
+ #  Lvl  Icon  Total jobs  max_pages  Splits  +Replica  Category
+----------------------------------------------------------------
+ 1  L1   🟢        2,167         50      no        no  Legal
+ 2  L1   🟢        2,070         50      no        no  Translation
+ 3  L2   🟡        4,969        100      no        no  Writing
+ 4  L2   🟡        4,290        100      no        no  Data Science & Analytics
+ 5  L2   🟡        3,233        100      no        no  Customer Service
+ 6  L2   🟡        3,072        100      no        no  IT & Networking
+ 7  L3   🟠       12,648        100     yes        no  Admin Support
+ 8  L3   🟠        7,809        100     yes        no  Accounting & Consulting
+ 9  L3   🟠        7,209        100     yes        no  Engineering & Architecture
+10  L4   🔴       40,764        100     yes       yes  Design & Creative
+11  L4   🔴       32,043        100     yes       yes  Sales & Marketing
+12  L4   🔴       31,929        100     yes       yes  Web, Mobile & Software Dev
+```
+
+> This table is regenerated weekly by the **micro-scraper** layer
+> (backend component #1) and used to decide how many scraper
+> containers to start.
+
+### Resources (per instance)
+
+```yaml
+Image: Dockerfile.scraper
+Memory: 2 GB (Chrome headless)
+CPU: 1.5 cores
+Restart: no (on-demand)
+Network: hetzner-private (10.0.0.x)
+Env:
+  DB_URL: postgresql://app:${DB_PASSWORD}@backend:5432/vacancy_mirror
+  LOG_LEVEL: INFO
+```
+
+---
+
+## 📦 CONTAINER 2: BACKEND
+
+### Purpose
+
+Always-on container running all 7 backend layers. Receives scraped
+data from scraper containers, processes it and serves the Telegram bot.
+
+### Backend layers
+
+#### Layer 1 — Micro-Scraper (category load monitor)
+
+- Runs `CategoryScraperService` weekly (headless Chrome)
+- Produces the category load table (L1–L4 classification)
+- Decides how many scraper container replicas to launch
+- Writes updated `total_jobs` + level info to PostgreSQL
+
+#### Layer 2 — Progress DB (scraper result ingestion)
+
+- PostgreSQL (pgvector) receives raw vacancy JSON from all scraper
+  containers over the private network
+- Current schema: `raw_jobs`, `scrape_runs` tables
+- Acts as the single source of truth for all downstream layers
+- ⚠️ Schema will be revised to support multi-scraper ingestion
+  (current schema was designed for single-scraper flow)
+
+#### Layer 3 — Normalizer + Embedding
+
+- Reads raw jobs from DB
+- Applies NLP normalization (regex, text cleaning)
+- Generates 384-dim embeddings via `BAAI/bge-small-en-v1.5`
+- Writes to `pattern_normalized_jobs` + `job_embeddings` tables
+
+#### Layer 4 — Clustering + Semantic Cores
+
+- Runs `NearestNeighbors` (cosine, radius=0.06) on embeddings
+- Groups similar jobs into clusters
+- Extracts semantic keyword cores per cluster
+- Writes to `job_clusters` table
+
+#### Layer 5 — AI Assistant + Orchestrator
+
+- Calls OpenAI API (`OPENAI_MODEL` env var, default `gpt-4-mini`)
+- Names cluster profiles based on job samples
+- Orchestrates the full pipeline execution order
+- Writes named profiles to `profiles` table
+
+#### Layer 6 — Telegram Bot
+
+- User-facing chat interface
+- Queries semantic search (pgvector ANN) based on user message
+- Returns matching vacancy profiles with links
+- Handles `/start`, `/search`, `/status` commands
+
+#### Layer 7 — Business Logic API
+
+- Internal REST API (FastAPI or plain HTTP)
+- Coordinates layers 1–6 lifecycle
+- Exposes `/health`, `/status`, `/trigger-pipeline` endpoints
+- Authentication: shared secret header
+
+### Resources
+
+```yaml
+Image: Dockerfile.backend
+Memory: 4 GB
+CPU: 3.5 cores
+Restart: unless-stopped
+Ports:
+  - 8000:8000  (internal API, not public)
+Network: hetzner-private (10.0.0.x)
+Env:
+  DB_URL: postgresql://app:${DB_PASSWORD}@localhost:5432/vacancy_mirror
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+  OPENAI_MODEL: gpt-4-mini
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+  LOG_LEVEL: INFO
+```
+
+---
 
 ---
 
@@ -641,12 +821,13 @@ docker-compose up -d --build
 
 ## 📝 VERSION HISTORY
 
-| Version | Date       | Changes                               |
-| ------- | ---------- | ------------------------------------- |
-| 1.0     | 2026-03-27 | Initial specification for CX32 server |
+| Version | Date       | Changes                                            |
+| ------- | ---------- | -------------------------------------------------- |
+| 1.0     | 2026-03-27 | Initial specification for CX32 server              |
+| 2.0     | 2026-03-29 | Two-container architecture, 7-layer backend, L1–L4 |
 
 ---
 
-**Last Updated:** 27 March 2026  
+**Last Updated:** 29 March 2026  
 **Author:** GitHub Copilot  
-**Status:** PRODUCTION READY
+**Status:** IN PROGRESS

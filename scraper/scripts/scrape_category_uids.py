@@ -1,7 +1,7 @@
 """Entry point: scrape Upwork category UIDs and total job counts.
 
 Delegates all logic to
-``vacancy_mirror_chatbot_rag.services.upwork_scraper.CategoryScraperService``.
+``scraper.services.upwork_scraper.CategoryScraperService``.
 Results are saved to ``scripts/upwork_category_uids.json`` in the format::
 
     {
@@ -28,7 +28,7 @@ sys.path.insert(
     str(Path(__file__).resolve().parent.parent / "src"),
 )
 
-from vacancy_mirror_chatbot_rag.services.upwork_scraper import (  # noqa: E402
+from scraper.services.upwork_scraper import (  # noqa: E402
     CategoryScraperService,
 )
 

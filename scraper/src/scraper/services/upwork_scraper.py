@@ -56,7 +56,7 @@ from typing import Any
 
 import nodriver as uc
 
-from vacancy_mirror_chatbot_rag.categories import classify_load
+from scraper.categories import classify_load
 
 log = logging.getLogger(__name__)
 
