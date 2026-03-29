@@ -21,8 +21,13 @@ DB_URL : str
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 
 from telegram import (
     BotCommand,
@@ -41,6 +46,10 @@ from telegram.ext import (
     filters,
 )
 
+from backend.services.google_sheets import (
+    GoogleSheetsService,
+    build_user_row,
+)
 from backend.services.postgres import PostgresJobExportService
 
 log = logging.getLogger(__name__)
@@ -59,6 +68,9 @@ CB_BENEFITS = "cb_benefits"
 CB_PRICING = "cb_pricing"
 CB_SUPPORT = "cb_support"
 CB_PRIVACY = "cb_privacy"
+CB_CANCEL_SUB = "cb_cancel_sub_ask"
+CB_CANCEL_SUB_CONFIRM = "cb_cancel_sub_yes"
+CB_CANCEL_SUB_ABORT = "cb_cancel_sub_no"
 
 # Support reply-preference callbacks
 CB_SUP_REPLY_TG = "sup_reply_tg"
@@ -113,7 +125,7 @@ async def cmd_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Handle /start — greet the user with structured welcome."""
+    """Handle /start — greet user, restore subscription status."""
     allowed: set[int] = context.bot_data["allowed_ids"]
     user = update.effective_user
     if not _is_allowed(user.id, allowed):
@@ -122,30 +134,84 @@ async def cmd_start(
         )
         return
 
-    text = (
-        f"👋 *Welcome, {user.first_name}\\!*\n\n"
-
-        "🪞 *Meet Vacancy Mirror*\n"
-        "AI\\-powered freelance market intelligence\\.\n"
-        "Stop guessing — start knowing\\. 🎯\n\n"
-
-        "✅ *What you get:*\n"
-        "🔍 Semantic job search — by meaning, not just keywords\n"
-        "🧩 Role clusters — see who's actually hiring\n"
-        "🤖 AI answers on skills, roles & market trends\n"
-        "📈 Know what the market wants before you apply\n\n"
-
-        "🔜 *Coming soon:*\n"
-        "▸ LinkedIn & Freelancer\\.com data\n"
-        "▸ Salary & rate benchmarks\n"
-        "▸ Personalised market reports\n"
-        "▸ Fiverr integration is under consideration\n\n"
-
-        "📡 *Powered by:* Upwork\n\n"
-
-        "🚀 Ready to explore the market?\n"
-        "Pick an option below 👇"
+    # Check existing subscription in DB so returning users
+    # who deleted the chat history still see their plan.
+    db_service: PostgresJobExportService = (
+        context.bot_data["db"]
     )
+    sub: dict | None = None
+    try:
+        sub = db_service.get_subscription(user.id)
+    except Exception:
+        pass  # DB unavailable — treat as no subscription
+
+    # Persist Telegram profile data and sync to Google Sheets.
+    try:
+        db_service.upsert_bot_user(
+            telegram_user_id=user.id,
+            first_name=user.first_name or "",
+            last_name=user.last_name or "",
+            username=user.username or "",
+        )
+        gs: GoogleSheetsService = context.bot_data["sheets"]
+        gs.upsert_user(build_user_row(
+            telegram_user_id=user.id,
+            first_name=user.first_name or "",
+            last_name=user.last_name or "",
+            username=user.username or "",
+            plan=sub["plan"] if sub else "free",
+            status=sub["status"] if sub else "none",
+            stripe_customer_id=(
+                sub.get("stripe_customer_id", "")
+                if sub else ""
+            ),
+            stripe_subscription_id=(
+                sub.get("stripe_subscription_id", "")
+                if sub else ""
+            ),
+        ))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to sync user to Sheets: %s", exc)
+
+    if sub and sub.get("status") == "active":
+        plan_label: str = (
+            "⭐ Plus"
+            if sub["plan"] == "plus"
+            else "🚀 Pro Plus"
+        )
+        text = (
+            f"👋 *Welcome back, {user.first_name}\\!*\n\n"
+            f"✅ Your *{plan_label}* subscription is active\\.\n"
+            "All your features are ready to use\\.\n\n"
+            "Pick an option below 👇"
+        )
+    else:
+        text = (
+            f"👋 *Welcome, {user.first_name}\\!*\n\n"
+
+            "🪞 *Meet Vacancy Mirror*\n"
+            "AI\\-powered freelance market intelligence\\.\n"
+            "Stop guessing — start knowing\\. 🎯\n\n"
+
+            "✅ *What you get:*\n"
+            "🔍 Semantic job search — by meaning, not just "
+            "keywords\n"
+            "🧩 Role clusters — see who's actually hiring\n"
+            "🤖 AI answers on skills, roles & market trends\n"
+            "📈 Know what the market wants before you apply\n\n"
+
+            "🔜 *Coming soon:*\n"
+            "▸ LinkedIn & Freelancer\\.com data\n"
+            "▸ Salary & rate benchmarks\n"
+            "▸ Personalised market reports\n"
+            "▸ Fiverr integration is under consideration\n\n"
+
+            "📡 *Powered by:* Upwork\n\n"
+
+            "🚀 Ready to explore the market?\n"
+            "Pick an option below 👇"
+        )
+
     await update.message.reply_text(
         text,
         parse_mode=ParseMode.MARKDOWN_V2,
@@ -299,89 +365,296 @@ async def cb_pricing(
     query = update.callback_query
     await query.answer()
 
-    # Stripe payment links — set via environment variables
-    # Append client_reference_id so the webhook can link
-    # the completed payment back to this Telegram user.
+    # Build pay redirect URLs through our own server so that
+    # Telegram shows a clean domain instead of a long Stripe URL
+    # with client_reference_id query param.
     user_id: int = update.effective_user.id
+    _base: str = os.environ.get(
+        "WEBHOOK_BASE_URL", ""
+    )
     _stripe_plus_base: str = os.environ.get(
         "STRIPE_PLUS_URL", "https://buy.stripe.com/plus"
     )
     _stripe_pro_plus_base: str = os.environ.get(
         "STRIPE_PRO_PLUS_URL", "https://buy.stripe.com/pro_plus"
     )
-    stripe_plus_url: str = (
-        f"{_stripe_plus_base}?client_reference_id={user_id}"
-    )
-    stripe_pro_plus_url: str = (
-        f"{_stripe_pro_plus_base}?client_reference_id={user_id}"
-    )
-
-    plans: list[str] = [
-        (
-            "💳 *Pricing & Subscription Plans*\n\n"
-            "_All plans are billed monthly\\. "
-            "Annual billing is not available\\._"
-        ),
-        (
-            "🆓 *Free Plan*\n\n"
-            "Everything you need to get started\\.\n\n"
-            "Includes:\n"
-            "▸ 📊 Weekly Freelance Trends Report\n"
-            "▸ 💬 AI Market Assistant "
-            "\\(limit: 35 messages every 24 hours\\)\n"
-            "▸ 📈 Weekly Trend Charts\n\n"
-            "_No payment required\\. Available to all users\\._"
-        ),
-        (
-            "⭐ *Plus Plan* — \\$9\\.99 / month\n\n"
-            "Everything in Free, plus advanced profile tools\\.\n\n"
-            "Includes:\n"
-            "▸ 💬 AI Market Assistant "
-            "\\(limit: 60 messages every 24 hours\\)\n"
-            "▸ 🎯 Profile Optimisation Expert\n"
-            "▸ 🤖 Weekly Profile & Projects Agent\n"
-            "   \\(up to 5 portfolio projects\\)\n\n"
-            "_Vacancy Mirror does not access or modify your "
-            "profile automatically\\. All recommendations are "
-            "for you to apply manually\\._"
-        ),
-        (
-            "🚀 *Pro Plus Plan* — \\$19\\.99 / month\n\n"
-            "Everything in Plus, with maximum coverage\\.\n\n"
-            "Includes:\n"
-            "▸ 💬 AI Market Assistant "
-            "\\(limit: 120 messages every 24 hours\\)\n"
-            "▸ 🚀 Extended Projects Agent\n"
-            "   \\(up to 12 portfolio projects\\)\n"
-            "▸ 🏷️ Weekly Skills & Tags Report\n\n"
-            "_Full portfolio coverage aligned with market "
-            "trends every week\\._"
-        ),
-    ]
-
-    for plan in plans:
-        await query.message.reply_text(
-            plan,
-            parse_mode=ParseMode.MARKDOWN_V2,
+    if _base:
+        stripe_plus_url: str = (
+            f"{_base}/pay/plus?uid={user_id}"
+        )
+        stripe_pro_plus_url: str = (
+            f"{_base}/pay/pro-plus?uid={user_id}"
+        )
+    else:
+        stripe_plus_url = (
+            f"{_stripe_plus_base}"
+            f"?client_reference_id={user_id}"
+        )
+        stripe_pro_plus_url = (
+            f"{_stripe_pro_plus_base}"
+            f"?client_reference_id={user_id}"
         )
 
+    # Header
     await query.message.reply_text(
-        "👇 *Choose your plan and subscribe via Stripe:*",
+        "💳 *Pricing & Subscription Plans*\n\n"
+        "_All plans are billed monthly\\. "
+        "Annual billing is not available\\._",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+    # Free plan — no button needed
+    await query.message.reply_text(
+        "🆓 *Free Plan*\n\n"
+        "Everything you need to get started\\.\n\n"
+        "Includes:\n"
+        "▸ 📊 Weekly Freelance Trends Report\n"
+        "▸ 💬 AI Market Assistant "
+        "\\(limit: 35 messages every 24 hours\\)\n"
+        "▸ 📈 Weekly Trend Charts\n\n"
+        "_No payment required\\. Available to all users\\._",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+    # Plus plan + subscribe button
+    await query.message.reply_text(
+        "⭐ *Plus Plan* — \\$9\\.99 / month\n\n"
+        "Everything in Free, plus advanced profile tools\\.\n\n"
+        "Includes:\n"
+        "▸ 💬 AI Market Assistant "
+        "\\(limit: 60 messages every 24 hours\\)\n"
+        "▸ 🎯 Profile Optimisation Expert\n"
+        "▸ 🤖 Weekly Profile & Projects Agent\n"
+        "   \\(up to 5 portfolio projects\\)\n\n"
+        "_Vacancy Mirror does not access or modify your "
+        "profile automatically\\. All recommendations are "
+        "for you to apply manually\\._",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "⭐ Subscribe to Plus",
+                url=stripe_plus_url,
+            ),
+        ]]),
+    )
+
+    # Pro Plus plan + subscribe button
+    await query.message.reply_text(
+        "🚀 *Pro Plus Plan* — \\$19\\.99 / month\n\n"
+        "Everything in Plus, with maximum coverage\\.\n\n"
+        "Includes:\n"
+        "▸ 💬 AI Market Assistant "
+        "\\(limit: 120 messages every 24 hours\\)\n"
+        "▸ 🚀 Extended Projects Agent\n"
+        "   \\(up to 12 portfolio projects\\)\n"
+        "▸ 🏷️ Weekly Skills & Tags Report\n\n"
+        "_Full portfolio coverage aligned with market "
+        "trends every week\\._",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "🚀 Subscribe to Pro Plus",
+                url=stripe_pro_plus_url,
+            ),
+        ]]),
+    )
+
+    # Footer: support + optional cancel button
+    footer_buttons: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            "❓ Questions? Contact support",
+            callback_data=CB_SUPPORT,
+        )],
+        *_cancel_sub_button(context.bot_data["db"], user_id),
+    ]
+    await query.message.reply_text(
+        "💬 Need help or want to manage your subscription?",
+        reply_markup=InlineKeyboardMarkup(footer_buttons),
+    )
+
+
+def _cancel_sub_button(
+    db: PostgresJobExportService,
+    user_id: int,
+) -> list[list[InlineKeyboardButton]]:
+    """Return a cancel-subscription button row if user has one.
+
+    Returns an empty list when no active subscription is found,
+    so the caller can safely unpack it with ``*``.
+    """
+    try:
+        sub = db.get_subscription(user_id)
+    except Exception:
+        return []
+    if sub and sub.get("status") == "active":
+        return [[InlineKeyboardButton(
+            "❌ Cancel my subscription",
+            callback_data=CB_CANCEL_SUB,
+        )]]
+    return []
+
+
+async def cb_cancel_sub(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Ask the user to confirm subscription cancellation."""
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "⚠️ *Cancel your subscription?*\n\n"
+        "Your plan will remain active until the end of the "
+        "current billing period\\. After that you will be "
+        "moved to the Free plan\\.\n\n"
+        "Are you sure you want to cancel?",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(
-                "⭐ Subscribe to Plus",
-                url=stripe_plus_url,
+                "✅ Yes, cancel my subscription",
+                callback_data=CB_CANCEL_SUB_CONFIRM,
             )],
             [InlineKeyboardButton(
-                "🚀 Subscribe to Pro Plus",
-                url=stripe_pro_plus_url,
-            )],
-            [InlineKeyboardButton(
-                "❓ Questions? Contact support",
-                callback_data=CB_SUPPORT,
+                "↩️ No, keep my subscription",
+                callback_data=CB_CANCEL_SUB_ABORT,
             )],
         ]),
+    )
+
+
+def _fetch_stripe_period_end(sub_id: str) -> str | None:
+    """Fetch current_period_end from Stripe and return formatted date.
+
+    Parameters
+    ----------
+    sub_id:
+        Stripe subscription ID (e.g. ``sub_xxx``).
+
+    Returns
+    -------
+    str | None
+        Human-readable date such as ``"29 April 2026"``, or ``None``
+        when the date cannot be determined.
+    """
+    if not sub_id:
+        return None
+    key = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+    if not key:
+        return None
+    token = base64.b64encode(f"{key}:".encode()).decode()
+    req = urllib.request.Request(
+        f"https://api.stripe.com/v1/subscriptions/{sub_id}",
+        headers={"Authorization": f"Basic {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data: dict = json.loads(resp.read())
+            ts = data.get("current_period_end")
+            if ts:
+                dt = datetime.fromtimestamp(
+                    int(ts), tz=timezone.utc
+                )
+                return dt.strftime("%-d %B %Y")
+    except urllib.error.URLError as exc:
+        log.warning("Stripe API request failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Unexpected error fetching period end: %s", exc)
+    return None
+
+
+async def cb_cancel_sub_confirm(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Mark subscription as cancelled in DB and notify user."""
+    query = update.callback_query
+    await query.answer()
+    user_id: int = update.effective_user.id
+    db: PostgresJobExportService = context.bot_data["db"]
+
+    end_date: str | None = None
+    sub: dict | None = None
+    try:
+        sub = db.get_subscription(user_id)
+        if sub:
+            end_date = _fetch_stripe_period_end(
+                sub.get("stripe_subscription_id", "")
+            )
+            db.upsert_subscription(
+                telegram_user_id=user_id,
+                plan=sub["plan"],
+                stripe_customer_id=sub.get(
+                    "stripe_customer_id"
+                ),
+                stripe_subscription_id=sub.get(
+                    "stripe_subscription_id"
+                ),
+                status="cancelled",
+            )
+        cancelled = True
+    except Exception as exc:  # noqa: BLE001
+        log.error("Failed to cancel subscription: %s", exc)
+        cancelled = False
+
+    # Sync updated status to Google Sheets.
+    if cancelled and sub:
+        try:
+            tg_user = update.effective_user
+            gs: GoogleSheetsService = context.bot_data["sheets"]
+            gs.upsert_user(build_user_row(
+                telegram_user_id=user_id,
+                first_name=tg_user.first_name or "",
+                last_name=tg_user.last_name or "",
+                username=tg_user.username or "",
+                plan=sub["plan"],
+                status="cancelled",
+                stripe_customer_id=sub.get(
+                    "stripe_customer_id", ""
+                ),
+                stripe_subscription_id=sub.get(
+                    "stripe_subscription_id", ""
+                ),
+            ))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "Sheets sync after cancel failed: %s", exc
+            )
+
+    if cancelled:
+        if end_date:
+            until_text = (
+                f"until *{end_date}*"
+            )
+        else:
+            until_text = (
+                "until the end of the current billing period"
+            )
+        await query.message.reply_text(
+            f"✅ *Subscription cancelled*\n\n"
+            f"Your plan will stay active {until_text}\\. "
+            f"After that you will be on the Free plan\\.\n\n"
+            "You can re\\-subscribe any time via the "
+            "*Pricing* menu\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+    else:
+        await query.message.reply_text(
+            "⚠️ Something went wrong\\. "
+            "Please contact support\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+
+
+async def cb_cancel_sub_abort(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """User changed their mind — dismiss the confirmation."""
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "👍 No changes made\\. Your subscription is still "
+        "active\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
     )
 
 
@@ -893,6 +1166,7 @@ class TelegramBotService:
         token: Bot token from @BotFather.
         allowed_ids: Set of permitted Telegram user IDs (empty = all).
         db: PostgreSQL service instance.
+        sheets: Google Sheets sync service instance.
     """
 
     def __init__(
@@ -922,6 +1196,7 @@ class TelegramBotService:
         self.db: PostgresJobExportService = PostgresJobExportService(
             db_url=db_url
         )
+        self.sheets: GoogleSheetsService = GoogleSheetsService()
 
     def _build_application(self) -> Application:
         """Build and configure the telegram Application."""
@@ -934,6 +1209,7 @@ class TelegramBotService:
         # Shared state available to all handlers
         app.bot_data["allowed_ids"] = self.allowed_ids
         app.bot_data["db"] = self.db
+        app.bot_data["sheets"] = self.sheets
 
         # /search conversation
         search_conv = ConversationHandler(
@@ -1005,6 +1281,23 @@ class TelegramBotService:
         )
         app.add_handler(
             CallbackQueryHandler(cb_privacy, pattern=CB_PRIVACY)
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                cb_cancel_sub, pattern=CB_CANCEL_SUB
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                cb_cancel_sub_confirm,
+                pattern=CB_CANCEL_SUB_CONFIRM,
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                cb_cancel_sub_abort,
+                pattern=CB_CANCEL_SUB_ABORT,
+            )
         )
         app.add_handler(
             MessageHandler(

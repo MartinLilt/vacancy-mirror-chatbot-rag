@@ -591,6 +591,111 @@ class PostgresJobExportService:
                 row = cur.fetchone()
         return dict(row) if row else None
 
+    # ------------------------------------------------------------------
+    # Bot users table (Telegram profile data)
+    # ------------------------------------------------------------------
+
+    def ensure_bot_users_table(self) -> None:
+        """Create bot_users table to store Telegram profile data."""
+        ddl = """
+        CREATE TABLE IF NOT EXISTS bot_users (
+            telegram_user_id BIGINT PRIMARY KEY,
+            first_name TEXT NOT NULL DEFAULT '',
+            last_name TEXT NOT NULL DEFAULT '',
+            username TEXT NOT NULL DEFAULT '',
+            first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(ddl)
+            conn.commit()
+        logger.info("Table bot_users is ready.")
+
+    def upsert_bot_user(
+        self,
+        telegram_user_id: int,
+        first_name: str,
+        last_name: str,
+        username: str,
+    ) -> None:
+        """Insert or update a Telegram user's profile data.
+
+        Args:
+            telegram_user_id: Telegram user ID.
+            first_name: User's first name.
+            last_name: User's last name (may be empty).
+            username: User's @username (without @, may be empty).
+        """
+        self.ensure_bot_users_table()
+        sql = """
+        INSERT INTO bot_users (
+            telegram_user_id, first_name, last_name,
+            username, last_seen
+        ) VALUES (
+            %(telegram_user_id)s, %(first_name)s, %(last_name)s,
+            %(username)s, NOW()
+        )
+        ON CONFLICT (telegram_user_id) DO UPDATE SET
+            first_name = EXCLUDED.first_name,
+            last_name = EXCLUDED.last_name,
+            username = EXCLUDED.username,
+            last_seen = NOW();
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {
+                    "telegram_user_id": telegram_user_id,
+                    "first_name": first_name,
+                    "last_name": last_name or "",
+                    "username": username or "",
+                })
+            conn.commit()
+        logger.debug(
+            "bot_users upserted: user=%s", telegram_user_id
+        )
+
+    def get_all_users_for_sheet(
+        self,
+    ) -> list[dict[str, Any]]:
+        """Return all bot users joined with their subscription data.
+
+        Used for a full Google Sheets sync.  Users who have no
+        subscription record are returned with plan='free' and
+        status='none'.
+
+        Returns:
+            List of dicts with keys matching the Sheets columns.
+        """
+        self.ensure_bot_users_table()
+        self.ensure_subscriptions_table()
+        sql = """
+        SELECT
+            u.telegram_user_id,
+            u.first_name,
+            u.last_name,
+            u.username,
+            COALESCE(s.plan, 'free')  AS plan,
+            COALESCE(s.status, 'none') AS status,
+            COALESCE(s.stripe_customer_id, '') AS stripe_customer_id,
+            COALESCE(s.stripe_subscription_id, '')
+                AS stripe_subscription_id,
+            u.first_seen,
+            u.last_seen AS last_updated
+        FROM bot_users u
+        LEFT JOIN subscriptions s
+            ON s.telegram_user_id = u.telegram_user_id
+        ORDER BY u.first_seen;
+        """
+        with self._connect() as conn:
+            with conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor
+            ) as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
     def get_subscription_by_stripe_customer(
         self,
         stripe_customer_id: str,

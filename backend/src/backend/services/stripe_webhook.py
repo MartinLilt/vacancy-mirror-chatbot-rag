@@ -29,6 +29,10 @@ import threading
 import urllib.request
 from typing import Any
 
+from backend.services.google_sheets import (
+    GoogleSheetsService,
+    build_user_row,
+)
 from backend.services.postgres import PostgresJobExportService
 
 log = logging.getLogger(__name__)
@@ -160,14 +164,50 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
     """HTTP request handler for Stripe webhook events."""
 
     db: PostgresJobExportService
+    sheets: GoogleSheetsService
     token: str
     secret: str
+    stripe_plus_url: str
+    stripe_pro_plus_url: str
 
     def log_message(  # type: ignore[override]
         self, format: str, *args: Any
     ) -> None:
         """Suppress default access log; use Python logging."""
         log.debug(format, *args)
+
+    def do_GET(self) -> None:  # noqa: N802
+        """Handle GET /pay/plus and /pay/pro-plus.
+
+        Redirects to Stripe Payment Link, appending
+        ``client_reference_id`` from the ``uid`` query param.
+        This keeps the Telegram button URL clean (no long params).
+        """
+        import urllib.parse as _up
+        parsed = _up.urlparse(self.path)
+        params = dict(_up.parse_qsl(parsed.query))
+        uid = params.get("uid", "")
+
+        if parsed.path == "/pay/plus":
+            base = self.stripe_plus_url
+        elif parsed.path == "/pay/pro-plus":
+            base = self.stripe_pro_plus_url
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        if uid:
+            target = f"{base}?client_reference_id={uid}"
+        else:
+            target = base
+
+        self.send_response(302)
+        self.send_header("Location", target)
+        self.end_headers()
+        log.info(
+            "Redirecting uid=%s to %s", uid, parsed.path
+        )
 
     def do_POST(self) -> None:  # noqa: N802
         """Handle POST /webhook from Stripe."""
@@ -256,6 +296,20 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
             status="active",
         )
 
+        # Sync to Google Sheets.
+        try:
+            self.sheets.upsert_user(build_user_row(
+                telegram_user_id=telegram_user_id,
+                plan=plan,
+                status="active",
+                stripe_customer_id=customer_id or "",
+                stripe_subscription_id=subscription_id or "",
+            ))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "Sheets sync after checkout failed: %s", exc
+            )
+
         plan_labels = {
             "plus": "⭐ Plus",
             "pro_plus": "🚀 Pro Plus",
@@ -318,6 +372,20 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                 stripe_subscription_id=sub_id,
                 status=new_status,
             )
+            # Sync to Google Sheets.
+            try:
+                self.sheets.upsert_user(build_user_row(
+                    telegram_user_id=telegram_user_id,
+                    plan=sub["plan"],
+                    status=new_status,
+                    stripe_customer_id=customer_id or "",
+                    stripe_subscription_id=sub_id or "",
+                ))
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "Sheets sync after sub change failed: %s",
+                    exc,
+                )
             if new_status == "cancelled":
                 _send_telegram_message(
                     token=self.token,
@@ -343,6 +411,7 @@ class StripeWebhookService:
         token: Telegram bot token.
         secret: Stripe webhook signing secret.
         db: PostgreSQL service instance.
+        sheets: Google Sheets sync service instance.
     """
 
     def __init__(
@@ -363,6 +432,7 @@ class StripeWebhookService:
                 then 8080.
         """
         self.db = PostgresJobExportService(db_url=db_url)
+        self.sheets = GoogleSheetsService()
         self.token: str = token or os.environ.get(
             "TELEGRAM_BOT_TOKEN", ""
         )
@@ -371,6 +441,12 @@ class StripeWebhookService:
         )
         self.port: int = port or int(
             os.environ.get("WEBHOOK_PORT", "8080")
+        )
+        self.stripe_plus_url: str = os.environ.get(
+            "STRIPE_PLUS_URL", ""
+        )
+        self.stripe_pro_plus_url: str = os.environ.get(
+            "STRIPE_PRO_PLUS_URL", ""
         )
 
         if not self.secret:
@@ -389,6 +465,9 @@ class StripeWebhookService:
                 "db": self.db,
                 "token": self.token,
                 "secret": self.secret,
+                "sheets": self.sheets,
+                "stripe_plus_url": self.stripe_plus_url,
+                "stripe_pro_plus_url": self.stripe_pro_plus_url,
             },
         )
         server = http.server.HTTPServer(
