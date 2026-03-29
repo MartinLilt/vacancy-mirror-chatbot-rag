@@ -1,7 +1,7 @@
 # Vacancy Mirror RAG Pipeline — Hetzner Deployment Specification
 
 **Дата создания:** 27 March 2026  
-**Версия:** 2.0  
+**Версия:** 3.0  
 **Язык:** English (для ChatGPT)
 
 ---
@@ -161,24 +161,32 @@ data from scraper containers, processes it and serves the Telegram bot.
 
 #### Layer 5 — AI Assistant + Orchestrator
 
-- Calls OpenAI API (`OPENAI_MODEL` env var, default `gpt-4-mini`)
+- Calls OpenAI API (`OPENAI_MODEL` env var, default `gpt-4.1-mini`)
 - Names cluster profiles based on job samples
 - Orchestrates the full pipeline execution order
 - Writes named profiles to `profiles` table
 
 #### Layer 6 — Telegram Bot
 
-- User-facing chat interface
-- Queries semantic search (pgvector ANN) based on user message
-- Returns matching vacancy profiles with links
-- Handles `/start`, `/search`, `/status` commands
+- Subscription-gated chatbot with **Free / Plus ($9.99/mo) / Pro Plus ($19.99/mo)** plans
+- Commands: `/start`, `/help`, `/cancel`; all navigation via inline keyboards
+- Inline sections: What can this bot do?, Pricing, Chat with AI, Support, Privacy
+- Personalised Pricing screen — shows upgrade button for Plus → Pro Plus users
+- Support flow: message forwarded to admin, user picks Telegram / email / no reply
+- Cancel subscription flow with Stripe period-end date fetched via API
+- On `/start`: syncs user to `bot_users` table + Google Sheets CRM
 
-#### Layer 7 — Business Logic API
+#### Layer 7 — Stripe Webhook + Pay Redirects
 
-- Internal REST API (FastAPI or plain HTTP)
-- Coordinates layers 1–6 lifecycle
-- Exposes `/health`, `/status`, `/trigger-pipeline` endpoints
-- Authentication: shared secret header
+- aiohttp HTTP server, listens on port `WEBHOOK_PORT` (default `8080`)
+- `POST /webhook` — Stripe webhook endpoint (signature verified via `STRIPE_WEBHOOK_SECRET`)
+  - `checkout.session.completed` → activates subscription in `subscriptions` table, notifies user
+  - `customer.subscription.updated` → updates plan/status, notifies user
+  - `customer.subscription.deleted` → marks cancelled, notifies user
+- `GET /pay/plus?uid=<telegram_id>` → redirects to Stripe Plus payment link
+- `GET /pay/pro-plus?uid=<telegram_id>` → redirects to Stripe Pro Plus payment link
+  (shows clean `vacancy-mirror.com` domain in Telegram instead of raw Stripe URLs)
+- All subscription changes synced to Google Sheets CRM
 
 ### Resources
 
@@ -188,13 +196,22 @@ Memory: 4 GB
 CPU: 3.5 cores
 Restart: unless-stopped
 Ports:
-  - 8000:8000  (internal API, not public)
+  - 8080:8080  (Stripe webhook + pay redirects, public HTTPS via reverse proxy)
 Network: hetzner-private (10.0.0.x)
 Env:
   DB_URL: postgresql://app:${DB_PASSWORD}@localhost:5432/vacancy_mirror
   OPENAI_API_KEY: ${OPENAI_API_KEY}
-  OPENAI_MODEL: gpt-4-mini
+  OPENAI_MODEL: gpt-4.1-mini
   TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+  SUPPORT_ADMIN_ID: ${SUPPORT_ADMIN_ID}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+  STRIPE_PLUS_URL: ${STRIPE_PLUS_URL}
+  STRIPE_PRO_PLUS_URL: ${STRIPE_PRO_PLUS_URL}
+  WEBHOOK_PORT: 8080
+  WEBHOOK_BASE_URL: https://vacancy-mirror.com
+  GOOGLE_SHEETS_ID: ${GOOGLE_SHEETS_ID}
+  GOOGLE_SERVICE_ACCOUNT_JSON: ${GOOGLE_SERVICE_ACCOUNT_JSON}
   LOG_LEVEL: INFO
 ```
 
@@ -283,16 +300,29 @@ Virtual Env:   NOT NEEDED (containerized)
 ### Core Data Processing
 
 ```
-psycopg2-binary==2.9.9        # PostgreSQL adapter
-sentence-transformers==3.0.1  # BAAI/bge-large-en-v1.5 model
-scikit-learn==1.3.2           # Clustering algorithms
-numpy==1.24.3                 # Numerical computations
+psycopg2-binary>=2.9          # PostgreSQL adapter
+sentence-transformers>=3.0    # BAAI/bge-small-en-v1.5 model (384-dim)
+scikit-learn>=1.3             # Clustering algorithms
+numpy>=1.24                   # Numerical computations
+```
+
+### Telegram Bot
+
+```
+python-telegram-bot>=21.0     # PTB async bot framework
+```
+
+### Payments & CRM
+
+```
+aiohttp>=3.9                  # Stripe webhook HTTP server
+gspread>=6.0                  # Google Sheets API client
 ```
 
 ### Browser Automation (Anti-Bot)
 
 ```
-nodriver==0.28                # Real Chrome browser control
+nodriver>=0.28                # Real Chrome browser control
 asyncio (built-in)            # Async/await support
 ```
 
@@ -306,13 +336,13 @@ urllib (built-in)             # HTTP requests to OpenAI API
 ### Utilities
 
 ```
-python-dotenv==1.0.0          # Environment variable management
+python-dotenv>=1.0            # Environment variable management
 typing (built-in)             # Type hints
 pathlib (built-in)            # Path handling
 ```
 
-**Total dependencies:** ~8 main packages + their sub-dependencies  
-**Download size:** ~800 MB (mostly sentence-transformers model)
+**Total dependencies:** ~10 main packages + their sub-dependencies  
+**Download size:** ~400 MB (sentence-transformers bge-small model)
 
 ---
 
@@ -351,7 +381,7 @@ Volumes:
 Ports: NONE (internal service)
 Environment: DB_URL=postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
   OPENAI_API_KEY=${OPENAI_API_KEY}
-  OPENAI_MODEL=gpt-4-mini
+  OPENAI_MODEL=gpt-4.1-mini
   PROXY_URL=${PROXY_URL}
   LOG_LEVEL=INFO
 Command: python -m vacancy_mirror_chatbot_rag.cli run-full-pipeline
@@ -378,13 +408,15 @@ Scraper:
 ### Estimated Database Sizes
 
 ```
-raw_jobs table:              ~2500 records × 50 KB = ~125 MB
-pattern_jobs table:          ~2500 records × 30 KB = ~75 MB
-pattern_normalized_jobs:     ~2500 records × 25 KB = ~60 MB
-job_embeddings:              ~2500 × 1024 float32 = ~10 MB
+raw_jobs table:              ~2500 records × 50 KB  = ~125 MB
+pattern_jobs table:          ~2500 records × 30 KB  = ~75 MB
+pattern_normalized_jobs:     ~2500 records × 25 KB  = ~60 MB
+job_embeddings:              ~2500 × 384 float32    = ~4 MB
 job_clusters:                6-10 clusters, ~1 KB each = <1 MB
-profiles:                    6-12 records × 5 KB = <100 KB
-scrape_runs:                 365 records × 1 KB = <1 MB
+profiles:                    6-12 records × 5 KB    = <100 KB
+scrape_runs:                 365 records × 1 KB     = <1 MB
+subscriptions:               ~1000 users × 1 KB     = ~1 MB
+bot_users:                   ~1000 users × 0.5 KB   = ~0.5 MB
 
 TOTAL:                       ~270 MB (initial)
 MONTHLY GROWTH:              ~50-100 MB (new jobs + snapshots)
@@ -404,10 +436,10 @@ Storage:        /backups/ on SSD
 ### Cache/Temp Data
 
 ```
-Downloaded models:     ~700 MB (BAAI/bge-large-en-v1.5)
+Downloaded models:     ~400 MB (BAAI/bge-small-en-v1.5)
 Embeddings cache:      ~10-50 MB
 Raw JSON cache:        ~100-200 MB
-Total temp:            ~850 MB (pre-allocated)
+Total temp:            ~550 MB (pre-allocated)
 ```
 
 ---
@@ -434,11 +466,10 @@ Step 2: Normalize Pattern Jobs
 Step 3: Build Job Embeddings
   - Operation: sentence-transformers batch inference
   - Input: 2500 normalized job descriptions
-  - Output: 2500 × 1024-dim float32 vectors
-  - Duration: ~2.5 minutes (CPU), ~30 seconds (GPU if available)
-  - Resources: 3 CPU, 3.5 GB RAM
+  - Output: 2500 × 384-dim float32 vectors (bge-small-en-v1.5)
+  - Duration: ~1-2 minutes (CPU)
+  - Resources: 2 CPU, 1.5 GB RAM
   - Batch Size: 32 jobs per batch
-  - Throughput: ~17 jobs/second
 
 Step 4: Cluster Job Embeddings
   - Operation: NearestNeighbors clustering
@@ -460,7 +491,7 @@ Step 6: Name Top Demanded Profiles
   - Output: Named profiles
   - Duration: ~1-2 minutes
   - Resources: Network I/O (minimal CPU/RAM)
-  - API Calls: 6-12 requests to gpt-4-mini
+  - API Calls: 6-12 requests to gpt-4.1-mini
   - Estimated API Cost: $0.05-0.15 per run
 
 Step 7: Build Semantic Core Profiles
@@ -518,19 +549,30 @@ api.openai.com:       TCP 443 (HTTPS)
                       Bandwidth: <100 Kbps
                       Latency: <5 seconds
 
+api.telegram.org:     TCP 443 (HTTPS)
+                      Used for: Telegram Bot API (polling + webhook)
+                      RPS: 1-5 requests/second
+
+api.stripe.com:       TCP 443 (HTTPS)
+                      Used for: Stripe payment API calls
+                      Bandwidth: <100 Kbps
+
+sheets.googleapis.com: TCP 443 (HTTPS)
+                      Used for: Google Sheets CRM sync
+
 Hugging Face Hub:     TCP 443 (HTTPS)
                       Used for: Model download (one-time)
                       Bandwidth: 50-100 Mbps (on first run)
-                      Size: ~700 MB
+                      Size: ~130 MB (bge-small-en-v1.5)
 ```
 
-### Inbound (Optional)
+### Inbound
 
 ```
 SSH:                  TCP 22 (for management)
                       Only from your IP (recommended)
-HTTP API:             TCP 8000 (optional, not implemented yet)
-                      For future REST API to query profiles
+Stripe Webhook:       TCP 8080 (HTTPS via reverse proxy, public)
+                      Required: Stripe sends POST /webhook here
 ```
 
 ### Firewall Rules
@@ -539,12 +581,16 @@ HTTP API:             TCP 8000 (optional, not implemented yet)
 Outbound:
   - HTTPS to Upwork.com: ALLOW
   - HTTPS to api.openai.com: ALLOW
+  - HTTPS to api.telegram.org: ALLOW
+  - HTTPS to api.stripe.com: ALLOW
+  - HTTPS to sheets.googleapis.com: ALLOW
   - HTTPS to huggingface.co: ALLOW
   - DNS: ALLOW (UDP 53)
 
 Inbound:
   - SSH: ALLOW from your IP only
-  - HTTP: BLOCK (unless serving API)
+  - TCP 80/443: ALLOW (reverse proxy / Let's Encrypt)
+  - TCP 8080: ALLOW (Stripe webhook, via reverse proxy)
   - PostgreSQL 5432: BLOCK (no external access)
 ```
 
@@ -558,9 +604,27 @@ Inbound:
 # PostgreSQL (REQUIRED)
 DB_PASSWORD=<strong_random_password_min_32_chars>
 
-# OpenAI (REQUIRED for step 6)
+# OpenAI (REQUIRED for RAG pipeline)
 OPENAI_API_KEY=sk-proj-<your_actual_key>
-OPENAI_MODEL=gpt-4-mini
+OPENAI_MODEL=gpt-4.1-mini
+
+# Telegram Bot (REQUIRED)
+TELEGRAM_BOT_TOKEN=<bot_token_from_botfather>
+SUPPORT_ADMIN_ID=<your_telegram_user_id>
+
+# Stripe Payments (REQUIRED)
+STRIPE_SECRET_KEY=sk_live_<your_stripe_secret_key>
+STRIPE_WEBHOOK_SECRET=whsec_<your_stripe_webhook_secret>
+STRIPE_PLUS_URL=https://buy.stripe.com/<plus_payment_link>
+STRIPE_PRO_PLUS_URL=https://buy.stripe.com/<pro_plus_payment_link>
+
+# Webhook server (REQUIRED)
+WEBHOOK_PORT=8080
+WEBHOOK_BASE_URL=https://vacancy-mirror.com
+
+# Google Sheets CRM (REQUIRED)
+GOOGLE_SHEETS_ID=<spreadsheet_id_from_url>
+GOOGLE_SERVICE_ACCOUNT_JSON=secrets/google_service_account.json
 
 # Proxy (OPTIONAL, if using rotating proxy)
 PROXY_URL_WEBDEV=http://proxy-ip:port
@@ -705,15 +769,32 @@ Before going live, ensure:
 - [ ] .env file created with all required variables:
   - [ ] DB_PASSWORD (strong, 32+ chars)
   - [ ] OPENAI_API_KEY (valid OpenAI key)
+  - [ ] OPENAI_MODEL=gpt-4.1-mini
+  - [ ] TELEGRAM_BOT_TOKEN (from BotFather)
+  - [ ] SUPPORT_ADMIN_ID (admin Telegram user ID)
+  - [ ] STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
+  - [ ] STRIPE_PLUS_URL, STRIPE_PRO_PLUS_URL
+  - [ ] WEBHOOK_PORT=8080, WEBHOOK_BASE_URL
+  - [ ] GOOGLE_SHEETS_ID
+  - [ ] GOOGLE_SERVICE_ACCOUNT_JSON path
   - [ ] PROXY_URL (if needed)
+- [ ] Google service account JSON placed in secrets/ (gitignored)
+- [ ] Service account shared as Editor on Google Sheets spreadsheet
+- [ ] Stripe account configured:
+  - [ ] Webhook endpoint registered at https://vacancy-mirror.com/webhook
+  - [ ] Payment links created for Plus and Pro Plus plans
+  - [ ] STRIPE_WEBHOOK_SECRET from Stripe dashboard
+- [ ] Port 8080 open in firewall (for Stripe webhook inbound)
 - [ ] Project cloned to /root/vacancy-mirror-chatbot-rag
 - [ ] docker-compose up -d executes without errors
 - [ ] PostgreSQL health check passes
 - [ ] Initial import-raw-to-db completes successfully
 - [ ] Full pipeline run-full-pipeline completes successfully
+- [ ] stripe-webhook service starts without errors
+- [ ] telegram-bot service starts without errors
 - [ ] Cron jobs configured in /etc/crontab
 - [ ] Backup directory created: mkdir -p /backups
-- [ ] Firewall rules applied (SSH + outbound HTTPS only)
+- [ ] Firewall rules applied (SSH + 8080 inbound, HTTPS outbound)
 - [ ] Monitoring/alerting configured
 - [ ] Documentation updated with server IP
 
@@ -730,21 +811,39 @@ Network:            €0 (unlimited)
 TOTAL:              €9/month
 ```
 
-### Monthly OpenAI (Step 6)
+### Monthly OpenAI (RAG pipeline Step 6)
 
 ```
-GPT-4-mini calls:   ~30 per month × 6-12 profiles
+gpt-4.1-mini calls: ~30 per month × 6-12 profiles
 Input tokens:       ~500 per call = 180,000 tokens/month
 Output tokens:      ~100 per call = 36,000 tokens/month
-Estimated cost:     ~$0.30-0.50/month (if daily runs)
+Estimated cost:     ~$0.10-0.20/month (gpt-4.1-mini is cheaper than gpt-4-mini)
+```
+
+### Stripe Payments
+
+```
+Platform fee:       $0/month (no monthly Stripe fee)
+Per-transaction:    2.9% + $0.30 per successful payment
+Example (10 subs):  ~$3.20/month on $100 revenue
+```
+
+### Google Sheets
+
+```
+Google Sheets API:  Free (up to 300 requests/minute)
+Service account:    Free (Google Cloud free tier)
+TOTAL:              $0/month
 ```
 
 ### TOTAL MONTHLY COST
 
 ```
 Hetzner:            €9.00 (~$10 USD)
-OpenAI:             $0.50 (minimal)
-TOTAL:              ~$10.50/month
+OpenAI:             ~$0.20 (minimal)
+Stripe:             % of revenue (no fixed cost)
+Google:             $0.00
+TOTAL:              ~$10.20/month + Stripe transaction fees
 ```
 
 ---
@@ -779,11 +878,43 @@ TOTAL:              ~$10.50/month
 - Check: `docker stats` for CPU/RAM bottlenecks
 - Upgrade: Consider CX32 if consistent slowness
 
+**Issue: Stripe webhook returns 400 / signature verification failed**
+
+- Solution: Verify STRIPE_WEBHOOK_SECRET matches the one in the Stripe dashboard
+- Check: The webhook endpoint in Stripe must point to `https://vacancy-mirror.com/webhook`
+- Tip: Use `stripe listen --forward-to localhost:8080/webhook` for local testing
+
+**Issue: Stripe webhook events not received**
+
+- Solution: Ensure port 8080 is open in the Hetzner firewall
+- Check: `curl -I https://vacancy-mirror.com/webhook` must return 405 (POST only)
+- Verify the stripe-webhook process is running: `ps aux | grep backend.cli`
+
+**Issue: Google Sheets sync fails with 403**
+
+- Solution: Ensure the service account email is shared as Editor on the spreadsheet
+- Check: Service account JSON path matches GOOGLE_SERVICE_ACCOUNT_JSON env var
+- Verify: `secrets/google_service_account.json` exists and is valid JSON
+
+**Issue: Telegram bot conflict error (409)**
+
+- Cause: Multiple bot instances running simultaneously
+- Solution: `pkill -9 -f "backend.cli"`, wait 5 seconds, then restart
+- Prevention: Never start the bot twice; use a process manager (systemd/supervisor)
+
+**Issue: Bot not responding to users**
+
+- Check: `tail -f /var/log/bot.log` for error messages
+- Verify: `echo $TELEGRAM_BOT_TOKEN` is correct
+- Check: Bot process is running: `ps aux | grep telegram-bot`
+
 ---
 
 ## 📚 USEFUL COMMANDS
 
 ```bash
+# ── Docker / Pipeline ──────────────────────────────────────────
+
 # View active containers
 docker-compose ps
 
@@ -792,7 +923,8 @@ docker-compose logs -f scraper
 docker-compose logs -f postgres
 
 # Run manual pipeline
-docker-compose exec scraper python -m vacancy_mirror_chatbot_rag.cli run-full-pipeline
+docker-compose exec scraper \
+  python -m vacancy_mirror_chatbot_rag.cli run-full-pipeline
 
 # Check database size
 docker-compose exec postgres psql -U app -d vacancy_mirror \
@@ -815,19 +947,50 @@ docker-compose restart
 # Rebuild and redeploy
 docker-compose down
 docker-compose up -d --build
+
+
+# ── Telegram Bot & Stripe Webhook ─────────────────────────────
+
+# Start Stripe webhook server (production)
+STRIPE_WEBHOOK_SECRET="whsec_..." \
+  .venv/bin/python -m backend.cli stripe-webhook \
+  >> /var/log/webhook.log 2>&1 &
+
+# Start Telegram bot (production)
+.venv/bin/python -m backend.cli telegram-bot \
+  >> /var/log/bot.log 2>&1 &
+
+# Check running bot/webhook processes
+ps aux | grep backend.cli
+
+# Stop all bot/webhook processes
+pkill -9 -f "backend.cli"
+
+# Tail bot logs
+tail -f /var/log/bot.log
+tail -f /var/log/webhook.log
+
+# Check subscriptions in DB
+docker-compose exec postgres psql -U app -d vacancy_mirror \
+  -c "SELECT * FROM subscriptions ORDER BY created_at DESC LIMIT 20;"
+
+# Check bot users in DB
+docker-compose exec postgres psql -U app -d vacancy_mirror \
+  -c "SELECT * FROM bot_users ORDER BY created_at DESC LIMIT 20;"
 ```
 
 ---
 
 ## 📝 VERSION HISTORY
 
-| Version | Date       | Changes                                            |
-| ------- | ---------- | -------------------------------------------------- |
-| 1.0     | 2026-03-27 | Initial specification for CX32 server              |
-| 2.0     | 2026-03-29 | Two-container architecture, 7-layer backend, L1–L4 |
+| Version | Date       | Changes                                                                          |
+| ------- | ---------- | -------------------------------------------------------------------------------- |
+| 1.0     | 2026-03-27 | Initial specification for CX32 server                                            |
+| 2.0     | 2026-03-29 | Two-container architecture, 7-layer backend, L1–L4                               |
+| 3.0     | 2026-03-29 | Stripe payments, Google Sheets CRM, Telegram subscription plans, bge-small model |
 
 ---
 
 **Last Updated:** 29 March 2026  
 **Author:** GitHub Copilot  
-**Status:** IN PROGRESS
+**Status:** CURRENT
