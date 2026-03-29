@@ -361,17 +361,34 @@ async def cb_pricing(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Handle 'Pricing' button — send three plans as a message burst."""
+    """Handle 'Pricing' button — send three plans as a message burst.
+
+    Buttons are personalised based on the user's current plan:
+    - free  → "Subscribe to Plus" + "Subscribe to Pro Plus"
+    - plus  → current plan badge on Plus + "Upgrade to Pro Plus"
+    - pro_plus → current plan badge on Pro Plus, no upgrade button
+    """
     query = update.callback_query
     await query.answer()
+
+    user_id: int = update.effective_user.id
+    db: PostgresJobExportService = context.bot_data["db"]
+
+    # Detect current plan / status.
+    current_plan: str = "free"
+    is_active: bool = False
+    try:
+        sub = db.get_subscription(user_id)
+        if sub and sub.get("status") == "active":
+            current_plan = sub.get("plan", "free")
+            is_active = True
+    except Exception:  # noqa: BLE001
+        pass
 
     # Build pay redirect URLs through our own server so that
     # Telegram shows a clean domain instead of a long Stripe URL
     # with client_reference_id query param.
-    user_id: int = update.effective_user.id
-    _base: str = os.environ.get(
-        "WEBHOOK_BASE_URL", ""
-    )
+    _base: str = os.environ.get("WEBHOOK_BASE_URL", "")
     _stripe_plus_base: str = os.environ.get(
         "STRIPE_PLUS_URL", "https://buy.stripe.com/plus"
     )
@@ -403,7 +420,12 @@ async def cb_pricing(
         parse_mode=ParseMode.MARKDOWN_V2,
     )
 
-    # Free plan — no button needed
+    # Free plan — show "✅ Your current plan" badge when active.
+    free_badge = (
+        "\n\n✅ _This is your current plan\\._"
+        if (not is_active)
+        else ""
+    )
     await query.message.reply_text(
         "🆓 *Free Plan*\n\n"
         "Everything you need to get started\\.\n\n"
@@ -412,11 +434,26 @@ async def cb_pricing(
         "▸ 💬 AI Market Assistant "
         "\\(limit: 35 messages every 24 hours\\)\n"
         "▸ 📈 Weekly Trend Charts\n\n"
-        "_No payment required\\. Available to all users\\._",
+        "_No payment required\\. Available to all users\\._"
+        f"{free_badge}",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
 
-    # Plus plan + subscribe button
+    # Plus plan — button depends on current plan.
+    if is_active and current_plan == "plus":
+        plus_button: list[list[InlineKeyboardButton]] = []
+        plus_badge = "\n\n✅ _This is your current plan\\._"
+    elif is_active and current_plan == "pro_plus":
+        # Already on higher plan — no plus button.
+        plus_button = []
+        plus_badge = ""
+    else:
+        plus_button = [[InlineKeyboardButton(
+            "⭐ Subscribe to Plus",
+            url=stripe_plus_url,
+        )]]
+        plus_badge = ""
+
     await query.message.reply_text(
         "⭐ *Plus Plan* — \\$9\\.99 / month\n\n"
         "Everything in Free, plus advanced profile tools\\.\n\n"
@@ -428,17 +465,36 @@ async def cb_pricing(
         "   \\(up to 5 portfolio projects\\)\n\n"
         "_Vacancy Mirror does not access or modify your "
         "profile automatically\\. All recommendations are "
-        "for you to apply manually\\._",
+        "for you to apply manually\\._"
+        f"{plus_badge}",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "⭐ Subscribe to Plus",
-                url=stripe_plus_url,
-            ),
-        ]]),
+        reply_markup=(
+            InlineKeyboardMarkup(plus_button)
+            if plus_button else None
+        ),
     )
 
-    # Pro Plus plan + subscribe button
+    # Pro Plus plan — show upgrade button for Plus users.
+    if is_active and current_plan == "pro_plus":
+        pro_button: list[list[InlineKeyboardButton]] = []
+        pro_badge = "\n\n✅ _This is your current plan\\._"
+    elif is_active and current_plan == "plus":
+        pro_button = [[InlineKeyboardButton(
+            "🚀 Upgrade to Pro Plus",
+            url=stripe_pro_plus_url,
+        )]]
+        pro_badge = (
+            "\n\n💡 _Upgrading from Plus — you will only be "
+            "charged the prorated difference for the rest of "
+            "the current billing period\\._"
+        )
+    else:
+        pro_button = [[InlineKeyboardButton(
+            "🚀 Subscribe to Pro Plus",
+            url=stripe_pro_plus_url,
+        )]]
+        pro_badge = ""
+
     await query.message.reply_text(
         "🚀 *Pro Plus Plan* — \\$19\\.99 / month\n\n"
         "Everything in Plus, with maximum coverage\\.\n\n"
@@ -449,14 +505,13 @@ async def cb_pricing(
         "   \\(up to 12 portfolio projects\\)\n"
         "▸ 🏷️ Weekly Skills & Tags Report\n\n"
         "_Full portfolio coverage aligned with market "
-        "trends every week\\._",
+        "trends every week\\._"
+        f"{pro_badge}",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "🚀 Subscribe to Pro Plus",
-                url=stripe_pro_plus_url,
-            ),
-        ]]),
+        reply_markup=(
+            InlineKeyboardMarkup(pro_button)
+            if pro_button else None
+        ),
     )
 
     # Footer: support + optional cancel button

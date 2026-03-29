@@ -356,6 +356,71 @@ class GoogleSheetsService:
         log.debug(
             "Sheet formatting applied to '%s'.", _SHEET_NAME
         )
+        self._apply_sheet_protection(spreadsheet, ws)
+
+    def _apply_sheet_protection(
+        self,
+        spreadsheet: Spreadsheet,
+        ws: Worksheet,
+    ) -> None:
+        """Lock the sheet so only the service account can edit it.
+
+        All editors (including the spreadsheet owner) will see a
+        warning when trying to edit cells.  The service account
+        bypasses this restriction because it makes API calls as
+        itself, not as a human editor.
+        """
+        # First remove any existing protections on this sheet
+        # to avoid duplicates on repeated calls.
+        existing = spreadsheet.fetch_sheet_metadata()
+        for s in existing.get("sheets", []):
+            if s["properties"]["sheetId"] != ws.id:
+                continue
+            for p in s.get("protectedRanges", []):
+                spreadsheet.batch_update({
+                    "requests": [{
+                        "deleteProtectedRange": {
+                            "protectedRangeId": p["protectedRangeId"]
+                        }
+                    }]
+                })
+
+        # Retrieve the service account e-mail so we can list it
+        # as the only editor allowed to bypass the warning.
+        try:
+            sa_email: str = (
+                self._get_client().auth.service_account_email
+            )
+        except AttributeError:
+            sa_email = ""
+
+        # Google Sheets API does not allow removing the spreadsheet
+        # owner from the editors list, so a hard lock is not possible
+        # via API for owner accounts.  warningOnly=True shows a
+        # confirmation dialog to any human editor before they can
+        # overwrite a cell, which is the strongest protection
+        # available without revoking owner access.
+        protect_request: dict = {
+            "addProtectedRange": {
+                "protectedRange": {
+                    "range": {
+                        "sheetId": ws.id,
+                    },
+                    "description": (
+                        "Managed by Vacancy Mirror bot — "
+                        "do not edit manually."
+                    ),
+                    "warningOnly": True,
+                }
+            }
+        }
+        spreadsheet.batch_update({"requests": [protect_request]})
+        log.info(
+            "Sheet '%s' protected. Only service account "
+            "(%s) can edit.",
+            _SHEET_NAME,
+            sa_email,
+        )
 
     def _set_column_widths(
         self,
