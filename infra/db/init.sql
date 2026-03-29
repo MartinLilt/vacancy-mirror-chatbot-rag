@@ -61,6 +61,20 @@ CREATE INDEX IF NOT EXISTS profile_embeddings_vector_idx ON profile_embeddings U
 WITH (lists = 10);
 
 -- ---------------------------------------------------------------------------
+-- subscriptions — Telegram user subscription state managed via Stripe
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id BIGSERIAL PRIMARY KEY,
+    telegram_user_id BIGINT NOT NULL UNIQUE,
+    plan TEXT NOT NULL, -- 'free' | 'plus' | 'pro_plus'
+    stripe_customer_id TEXT,
+    stripe_subscription_id TEXT,
+    status TEXT NOT NULL DEFAULT 'active', -- 'active' | 'cancelled' | 'past_due'
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ---------------------------------------------------------------------------
 -- job_samples — individual job postings linked to a profile (RAG context)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS job_samples (

@@ -213,7 +213,8 @@ async def cb_benefits(
             "_The assistant provides guidance and recommendations "
             "only\\. It does not access your Upwork account or take "
             "any actions for you\\._\n\n"
-            "Limit: 30 messages every 24 hours\\."
+            "Limit: 35 messages every 24 hours \\(Free\\), "
+            "60 \\(Plus\\), 120 \\(Pro Plus\\)\\."
         ),
         (
             "3\\. 📈 *Weekly Trend Charts* `Free`\n\n"
@@ -299,11 +300,20 @@ async def cb_pricing(
     await query.answer()
 
     # Stripe payment links — set via environment variables
-    stripe_plus_url: str = os.environ.get(
+    # Append client_reference_id so the webhook can link
+    # the completed payment back to this Telegram user.
+    user_id: int = update.effective_user.id
+    _stripe_plus_base: str = os.environ.get(
         "STRIPE_PLUS_URL", "https://buy.stripe.com/plus"
     )
-    stripe_pro_plus_url: str = os.environ.get(
+    _stripe_pro_plus_base: str = os.environ.get(
         "STRIPE_PRO_PLUS_URL", "https://buy.stripe.com/pro_plus"
+    )
+    stripe_plus_url: str = (
+        f"{_stripe_plus_base}?client_reference_id={user_id}"
+    )
+    stripe_pro_plus_url: str = (
+        f"{_stripe_pro_plus_base}?client_reference_id={user_id}"
     )
 
     plans: list[str] = [
@@ -318,14 +328,16 @@ async def cb_pricing(
             "Includes:\n"
             "▸ 📊 Weekly Freelance Trends Report\n"
             "▸ 💬 AI Market Assistant "
-            "\\(limit: 30 messages every 24 hours\\)\n"
+            "\\(limit: 35 messages every 24 hours\\)\n"
             "▸ 📈 Weekly Trend Charts\n\n"
             "_No payment required\\. Available to all users\\._"
         ),
         (
-            "⭐ *Plus Plan* — monthly subscription\n\n"
+            "⭐ *Plus Plan* — \\$9\\.99 / month\n\n"
             "Everything in Free, plus advanced profile tools\\.\n\n"
             "Includes:\n"
+            "▸ 💬 AI Market Assistant "
+            "\\(limit: 60 messages every 24 hours\\)\n"
             "▸ 🎯 Profile Optimisation Expert\n"
             "▸ 🤖 Weekly Profile & Projects Agent\n"
             "   \\(up to 5 portfolio projects\\)\n\n"
@@ -334,9 +346,11 @@ async def cb_pricing(
             "for you to apply manually\\._"
         ),
         (
-            "🚀 *Pro Plus Plan* — monthly subscription\n\n"
+            "🚀 *Pro Plus Plan* — \\$19\\.99 / month\n\n"
             "Everything in Plus, with maximum coverage\\.\n\n"
             "Includes:\n"
+            "▸ 💬 AI Market Assistant "
+            "\\(limit: 120 messages every 24 hours\\)\n"
             "▸ 🚀 Extended Projects Agent\n"
             "   \\(up to 12 portfolio projects\\)\n"
             "▸ 🏷️ Weekly Skills & Tags Report\n\n"
@@ -352,7 +366,7 @@ async def cb_pricing(
         )
 
     await query.message.reply_text(
-        "� *Choose your plan and subscribe via Stripe:*",
+        "👇 *Choose your plan and subscribe via Stripe:*",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(

@@ -18,6 +18,7 @@ from backend.services.openai import OpenAIProfileNamingService
 from backend.services.postgres import (
     PostgresJobExportService,
 )
+from backend.services.stripe_webhook import StripeWebhookService
 from backend.services.telegram_bot import TelegramBotService
 
 
@@ -245,6 +246,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bot_parser.set_defaults(func=telegram_bot_command)
 
+    webhook_parser = subparsers.add_parser(
+        "stripe-webhook",
+        help="Start the Stripe webhook HTTP server.",
+    )
+    webhook_parser.add_argument(
+        "--db-url",
+        default=None,
+        help="PostgreSQL URL. Default: DB_URL env var",
+    )
+    webhook_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Port to listen on. Default: WEBHOOK_PORT or 8080",
+    )
+    webhook_parser.set_defaults(func=stripe_webhook_command)
+
     return parser
 
 
@@ -253,6 +271,15 @@ def telegram_bot_command(args: argparse.Namespace) -> int:
     db_url: str | None = args.db_url or None
     bot = TelegramBotService(db_url=db_url)
     bot.run()
+    return 0
+
+
+def stripe_webhook_command(args: argparse.Namespace) -> int:
+    """Start the Stripe webhook HTTP server (blocking)."""
+    db_url: str | None = args.db_url or None
+    port: int | None = args.port or None
+    server = StripeWebhookService(db_url=db_url, port=port)
+    server.run()
     return 0
 
 

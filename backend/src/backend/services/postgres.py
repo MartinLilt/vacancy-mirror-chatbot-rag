@@ -488,3 +488,137 @@ class PostgresJobExportService:
                 cur.execute(sql, {"query": query, "limit": limit})
                 rows = cur.fetchall()
         return [dict(row) for row in rows]
+
+    def ensure_subscriptions_table(self) -> None:
+        """Create subscriptions table if it does not exist."""
+        ddl = """
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id BIGSERIAL PRIMARY KEY,
+            telegram_user_id BIGINT NOT NULL UNIQUE,
+            plan TEXT NOT NULL,
+            stripe_customer_id TEXT,
+            stripe_subscription_id TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(ddl)
+            conn.commit()
+
+    def upsert_subscription(
+        self,
+        telegram_user_id: int,
+        plan: str,
+        stripe_customer_id: str | None = None,
+        stripe_subscription_id: str | None = None,
+        status: str = "active",
+    ) -> None:
+        """Insert or update a user subscription.
+
+        Args:
+            telegram_user_id: Telegram user ID.
+            plan: Plan name — 'free', 'plus', or 'pro_plus'.
+            stripe_customer_id: Stripe customer ID.
+            stripe_subscription_id: Stripe subscription ID.
+            status: Subscription status.
+        """
+        self.ensure_subscriptions_table()
+        sql = """
+        INSERT INTO subscriptions (
+            telegram_user_id, plan,
+            stripe_customer_id, stripe_subscription_id, status
+        ) VALUES (
+            %(telegram_user_id)s, %(plan)s,
+            %(stripe_customer_id)s, %(stripe_subscription_id)s,
+            %(status)s
+        )
+        ON CONFLICT (telegram_user_id) DO UPDATE SET
+            plan = EXCLUDED.plan,
+            stripe_customer_id = EXCLUDED.stripe_customer_id,
+            stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+            status = EXCLUDED.status,
+            updated_at = NOW();
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {
+                    "telegram_user_id": telegram_user_id,
+                    "plan": plan,
+                    "stripe_customer_id": stripe_customer_id,
+                    "stripe_subscription_id": (
+                        stripe_subscription_id
+                    ),
+                    "status": status,
+                })
+            conn.commit()
+        logger.info(
+            "Subscription upserted: user=%s plan=%s status=%s",
+            telegram_user_id, plan, status,
+        )
+
+    def get_subscription(
+        self,
+        telegram_user_id: int,
+    ) -> dict[str, Any] | None:
+        """Fetch the subscription record for a Telegram user.
+
+        Args:
+            telegram_user_id: Telegram user ID.
+
+        Returns:
+            Subscription dict or None if not found.
+        """
+        self.ensure_subscriptions_table()
+        sql = """
+        SELECT
+            telegram_user_id, plan,
+            stripe_customer_id, stripe_subscription_id,
+            status, created_at, updated_at
+        FROM subscriptions
+        WHERE telegram_user_id = %(telegram_user_id)s;
+        """
+        with self._connect() as conn:
+            with conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor
+            ) as cur:
+                cur.execute(
+                    sql,
+                    {"telegram_user_id": telegram_user_id},
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_subscription_by_stripe_customer(
+        self,
+        stripe_customer_id: str,
+    ) -> dict[str, Any] | None:
+        """Fetch a subscription by Stripe customer ID.
+
+        Args:
+            stripe_customer_id: Stripe customer ID string.
+
+        Returns:
+            Subscription dict or None if not found.
+        """
+        self.ensure_subscriptions_table()
+        sql = """
+        SELECT
+            telegram_user_id, plan,
+            stripe_customer_id, stripe_subscription_id,
+            status, created_at, updated_at
+        FROM subscriptions
+        WHERE stripe_customer_id = %(customer_id)s;
+        """
+        with self._connect() as conn:
+            with conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor
+            ) as cur:
+                cur.execute(
+                    sql,
+                    {"customer_id": stripe_customer_id},
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
