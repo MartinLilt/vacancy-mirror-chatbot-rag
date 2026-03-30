@@ -4,11 +4,16 @@ Commands
 --------
 scrape-categories   Scrape UIDs + job counts for all top-level categories.
 scrape              Scrape job listings for a specific category UID.
+inspect-category    Open the Upwork dropdown, click one category, verify
+                    its UID against our registry and print a load report.
 
 Usage (inside container)::
 
     python -m scraper.cli scrape-categories
     python -m scraper.cli scrape --uid 531770282580668418 --label webdev
+    python -m scraper.cli inspect-category \\
+        --name "Web, Mobile & Software Dev" \\
+        --expected-uid 531770282580668418
 """
 
 from __future__ import annotations
@@ -18,6 +23,8 @@ import asyncio
 import logging
 import sys
 
+from scraper.categories import CATEGORY_UIDS
+from scraper.services.postgres import ScraperPostgresService
 from scraper.services.upwork_scraper import (
     CategoryScraperService,
     UpworkScraperService,
@@ -29,6 +36,8 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(message)s",
 )
 log = logging.getLogger(__name__)
+
+_LEVEL_ICONS: dict[int, str] = {1: "🟢", 2: "🟡", 3: "🟠", 4: "🔴"}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -57,8 +66,10 @@ def _parse_args() -> argparse.Namespace:
     )
     scrape_p.add_argument(
         "--label",
-        required=True,
-        help="Human-readable label used for logging and DB records.",
+        default=None,
+        help=(
+            "Human-readable label (defaults to name from CATEGORY_UIDS)."
+        ),
     )
     scrape_p.add_argument(
         "--max-pages",
@@ -67,8 +78,90 @@ def _parse_args() -> argparse.Namespace:
         metavar="N",
         help=f"Max pages to scrape (default: {MAX_ALLOWED_PAGE}).",
     )
+    scrape_p.add_argument(
+        "--db-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "PostgreSQL connection URL. "
+            "Falls back to DATABASE_URL env var."
+        ),
+    )
+
+    # ── inspect-category ─────────────────────────────────────────────
+    inspect_p = sub.add_parser(
+        "inspect-category",
+        help=(
+            "Open the Upwork category dropdown, click one category, "
+            "verify its UID, and print a load classification report."
+        ),
+    )
+    inspect_p.add_argument(
+        "--name",
+        default="Web, Mobile & Software Dev",
+        help=(
+            "Category display name (default: "
+            "'Web, Mobile & Software Dev')."
+        ),
+    )
+    inspect_p.add_argument(
+        "--expected-uid",
+        default=None,
+        help=(
+            "Expected category2_uid. Defaults to the value from "
+            "our local CATEGORY_UIDS registry."
+        ),
+    )
 
     return parser.parse_args()
+
+
+def _print_load_report(result: dict) -> None:
+    """Print a formatted load classification table for one category."""
+    load = result.get("load")
+    name: str = result["name"]
+    total_jobs: int | None = result.get("total_jobs")
+    uid_found: str | None = result.get("uid_found")
+    uid_expected: str = result["uid_expected"]
+    uid_match: bool = result.get("uid_match", False)
+
+    sep = "-" * 68
+    print(sep)
+    print(
+        f" {'#':<3} {'Lvl':<5} {'Icon':<5} {'Total jobs':<12} "
+        f"{'max_pages':<10} {'Splits':<8} {'+Replica':<10} Category"
+    )
+    print(sep)
+
+    if load is not None:
+        icon = _LEVEL_ICONS.get(load.level, "?")
+        total_str = (
+            f"{total_jobs:,}" if total_jobs is not None else "n/a"
+        )
+        splits = "yes" if load.needs_splits else "no"
+        replica = "yes" if load.needs_extra_replica else "no"
+        print(
+            f" {'1':<3} L{load.level:<4} {icon:<5} {total_str:<12} "
+            f"{load.max_pages:<10} {splits:<8} {replica:<10} {name}"
+        )
+    else:
+        print("  ⚠️  Could not determine load — UID not found in URL")
+
+    print(sep)
+    print()
+
+    # UID verification result
+    if uid_match:
+        print(f"  ✅ UID verified: {uid_found} == {uid_expected}")
+    else:
+        print("  ❌ UID MISMATCH!")
+        print(f"     Found in URL : {uid_found or 'n/a'}")
+        print(f"     Expected     : {uid_expected}")
+        print(
+            "     ⚠️  Update CATEGORY_UIDS in categories.py "
+            "if Upwork changed the UID."
+        )
+    print()
 
 
 async def _cmd_scrape_categories() -> None:
@@ -89,12 +182,230 @@ async def _cmd_scrape_categories() -> None:
 
 
 async def _cmd_scrape(args: argparse.Namespace) -> None:
-    """Scrape job listings for a single category."""
-    service = UpworkScraperService()
-    await service.scrape_category(
-        category_uid=args.uid,
-        max_pages=args.max_pages,
+    """Scrape job listings for a single category, save to PostgreSQL.
+
+    After scraping, prints all collected jobs to stdout so the user
+    can inspect the raw data and decide on the final output format.
+    """
+    db_url: str | None = (
+        args.db_url
+        if hasattr(args, "db_url") and args.db_url
+        else __import__("os").environ.get("DATABASE_URL")
     )
+
+    # Resolve category name from UID (best-effort, for DB record).
+    uid_to_name: dict[str, str] = {
+        v: k for k, v in CATEGORY_UIDS.items()
+    }
+    category_name: str = uid_to_name.get(
+        args.uid, args.label or args.uid
+    )
+
+    db: ScraperPostgresService | None = None
+    run_id: int | None = None
+
+    if db_url:
+        try:
+            db = ScraperPostgresService(db_url)
+            run_id = db.start_scrape_run(
+                category_uid=args.uid,
+                category_name=category_name,
+            )
+        except Exception as exc:
+            log.error("DB connection failed: %s", exc)
+            db = None
+    else:
+        log.warning(
+            "DATABASE_URL not set — results will NOT be saved to DB."
+        )
+
+    service = UpworkScraperService()
+    await service.start_browser()
+    first_url = (
+        f"https://www.upwork.com/nx/search/jobs/"
+        f"?category2_uid={args.uid}&per_page=50&page=1"
+    )
+    await service.manual_cloudflare_pass(first_url)
+
+    status = "failed"
+    jobs: list[dict] = []
+    try:
+        jobs = await service.scrape_category(
+            category_uid=args.uid,
+            max_pages=args.max_pages,
+        )
+        status = "done"
+    except Exception as exc:
+        log.error("Scraping error: %s", exc)
+    finally:
+        await service.stop_browser()
+
+    inserted = 0
+    if db is not None and run_id is not None:
+        if jobs:
+            inserted = db.insert_raw_jobs(
+                jobs=jobs,
+                scrape_run_id=run_id,
+                category_uid=args.uid,
+                category_name=category_name,
+            )
+        db.finish_scrape_run(
+            run_id=run_id,
+            pages_collected=args.max_pages,
+            jobs_collected=inserted,
+            status=status,
+        )
+        db.close()
+
+    log.info(
+        "Scrape complete: %d jobs collected, %d inserted to DB.",
+        len(jobs),
+        inserted,
+    )
+
+    # ── Print raw job list for inspection ─────────────────────────
+    _print_jobs(jobs, category_name=category_name)
+
+
+def _print_jobs(
+    jobs: list[dict],
+    *,
+    category_name: str = "",
+) -> None:
+    """Print collected jobs to stdout for inspection.
+
+    Args:
+        jobs: List of raw job dicts from the scraper.
+        category_name: Category label shown in the header.
+    """
+    _TYPE = {1: "fixed", 2: "hourly"}
+    total = len(jobs)
+    sep = "=" * 72
+    print()
+    print(sep)
+    print(
+        f"  {total} jobs collected"
+        + (f"  |  {category_name}" if category_name else "")
+    )
+    print(sep)
+
+    for i, job in enumerate(jobs, start=1):
+        title: str = job.get("title") or "n/a"
+        published: str = (job.get("publishedOn") or "")[:10] or "n/a"
+        job_type_int: int | None = job.get("type")
+        job_type: str = _TYPE.get(job_type_int, "n/a")
+        duration: str = job.get("durationLabel") or "n/a"
+        enterprise: bool = bool(job.get("enterpriseJob"))
+
+        # client
+        client: dict = job.get("client") or {}
+        loc = client.get("location") or {}
+        country: str = (
+            loc.get("country") if isinstance(loc, dict) else None
+        ) or "n/a"
+        payment_ok: str = (
+            "✅" if client.get("isPaymentVerified") else "❌"
+        )
+        spent = client.get("totalSpent")
+        spent_str: str = f"${spent:,.0f}" if spent else "n/a"
+        reviews = client.get("totalReviews")
+        reviews_str: str = str(reviews) if reviews else "n/a"
+        feedback = client.get("totalFeedback")
+        feedback_str: str = (
+            f"{feedback:.2f}" if feedback else "n/a"
+        )
+
+        # skills from attrs
+        attrs: list = job.get("attrs") or []
+        skills: list[str] = [
+            a["prefLabel"]
+            for a in attrs
+            if isinstance(a, dict) and a.get("prefLabel")
+        ]
+        skills_str: str = ", ".join(skills[:6]) or "n/a"
+
+        # budget
+        hourly: dict = job.get("hourlyBudget") or {}
+        h_min = hourly.get("min") or 0
+        h_max = hourly.get("max") or 0
+        weekly: dict = job.get("weeklyBudget") or {}
+        w_amt = weekly.get("amount") or 0
+
+        if job_type == "hourly" and h_max:
+            budget_str = f"${h_min}–${h_max}/hr"
+        elif job_type == "hourly" and w_amt:
+            budget_str = f"${w_amt}/wk"
+        elif job_type == "fixed":
+            fixed = (job.get("amount") or {}).get("amount") or 0
+            budget_str = f"${fixed}" if fixed else "n/a"
+        else:
+            budget_str = "n/a"
+
+        enterprise_str = " [ENTERPRISE]" if enterprise else ""
+
+        desc: str = (
+            (job.get("description") or "")
+            .replace("\n", " ")
+            .replace("<span class=\"highlight\">", "")
+            .replace("</span>", "")
+            .strip()
+        )
+        desc_preview: str = (
+            desc[:160] + "…" if len(desc) > 160 else desc
+        ) or "n/a"
+
+        print(
+            f"\n[{i:>3}] {title}{enterprise_str}"
+            f"\n      published={published}  type={job_type}"
+            f"  budget={budget_str}  duration={duration}"
+            f"\n      client: country={country}  payment={payment_ok}"
+            f"  spent={spent_str}  reviews={reviews_str}"
+            f"  feedback={feedback_str}"
+            f"\n      skills: [{skills_str}]"
+            f"\n      desc: {desc_preview}"
+        )
+
+    print()
+    print(sep)
+    print()
+
+
+async def _cmd_inspect_category(args: argparse.Namespace) -> None:
+    """Open Upwork, click one category, verify UID, print report."""
+    name: str = args.name
+    expected_uid: str = (
+        args.expected_uid
+        or CATEGORY_UIDS.get(name, "")
+    )
+
+    if not expected_uid:
+        log.error(
+            "Category '%s' not found in CATEGORY_UIDS registry "
+            "and --expected-uid was not provided.",
+            name,
+        )
+        sys.exit(1)
+
+    log.info(
+        "Inspecting category '%s' (expected uid=%s).",
+        name, expected_uid,
+    )
+
+    service = CategoryScraperService()
+    await service.start_browser()
+    await service.manual_cloudflare_pass()
+
+    result = await service.inspect_single_category(
+        category_name=name,
+        expected_uid=expected_uid,
+    )
+
+    await service.stop_browser()
+
+    _print_load_report(result)
+
+    if not result.get("uid_match"):
+        sys.exit(2)
 
 
 def main() -> None:
@@ -105,6 +416,8 @@ def main() -> None:
         asyncio.run(_cmd_scrape_categories())
     elif args.command == "scrape":
         asyncio.run(_cmd_scrape(args))
+    elif args.command == "inspect-category":
+        asyncio.run(_cmd_inspect_category(args))
     else:
         log.error("Unknown command: %s", args.command)
         sys.exit(1)

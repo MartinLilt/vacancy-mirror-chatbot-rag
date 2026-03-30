@@ -60,8 +60,11 @@ from scraper.categories import classify_load
 
 log = logging.getLogger(__name__)
 
-CHROME_PATH = (
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# Read Chrome/Chromium path from env so the container can override it.
+# Default falls back to macOS Chrome for local development.
+CHROME_PATH: str = __import__("os").environ.get(
+    "CHROME_PATH",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 )
 SEARCH_BASE = "https://www.upwork.com/nx/search/jobs/"
 PER_PAGE = 50
@@ -865,6 +868,146 @@ class CategoryScraperService:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    async def inspect_single_category(
+        self,
+        category_name: str,
+        expected_uid: str,
+    ) -> dict[str, Any]:
+        """Open the category dropdown, click one category, verify its UID.
+
+        Navigates the category filter dropdown to the requested category,
+        reads the ``category2_uid`` from the resulting URL, and compares
+        it against ``expected_uid`` from our local registry.
+
+        Args:
+            category_name: Display name, e.g.
+                ``"Web, Mobile & Software Dev"``.
+            expected_uid: The UID we have stored locally, e.g.
+                ``"531770282580668418"``.
+
+        Returns:
+            Dict with keys:
+
+            - ``name`` (str): Category display name.
+            - ``uid_found`` (str | None): UID read from URL after click.
+            - ``uid_expected`` (str): Our locally stored UID.
+            - ``uid_match`` (bool): True when both UIDs agree.
+            - ``total_jobs`` (int | None): Live job count from Upwork.
+            - ``load`` (CategoryLoad | None): Load classification or None
+              if uid not found.
+
+        Raises:
+            RuntimeError: If the browser has not been started.
+        """
+        if self.page is None:
+            raise RuntimeError(
+                "Browser not started. Call start_browser() first."
+            )
+
+        opened = await self._ensure_dropdown_open()
+        if not opened:
+            log.error(
+                "Category dropdown did not open — cannot inspect."
+            )
+            return {
+                "name": category_name,
+                "uid_found": None,
+                "uid_expected": expected_uid,
+                "uid_match": False,
+                "total_jobs": None,
+                "load": None,
+            }
+
+        # Read all option labels so we can find the right index.
+        labels_raw: str = await self.page.evaluate(f"""
+            (function() {{
+                const block = document.querySelector(
+                    '{_CAT_BLOCK_SEL}'
+                );
+                if (!block) return '';
+                return Array.from(block.querySelectorAll('li'))
+                    .map(el => el.innerText.trim())
+                    .filter(t => t.length > 0)
+                    .join('|||');
+            }})()
+        """)
+        labels: list[str] = [
+            lbl for lbl in labels_raw.split("|||") if lbl.strip()
+        ]
+
+        # Find the index for "All - <category_name>".
+        target_label = f"All - {category_name}"
+        target_idx: int | None = None
+        for idx, label in enumerate(labels):
+            if label.strip() == target_label:
+                target_idx = idx
+                break
+
+        if target_idx is None:
+            log.error(
+                "Category '%s' not found in dropdown. "
+                "Available labels: %s",
+                category_name,
+                [lbl for lbl in labels if lbl.startswith("All - ")],
+            )
+            return {
+                "name": category_name,
+                "uid_found": None,
+                "uid_expected": expected_uid,
+                "uid_match": False,
+                "total_jobs": None,
+                "load": None,
+            }
+
+        log.info(
+            "Clicking category '%s' (index %d)...",
+            category_name, target_idx,
+        )
+        await self.page.evaluate(f"""
+            (function() {{
+                const block = document.querySelector(
+                    '{_CAT_BLOCK_SEL}'
+                );
+                if (!block) return;
+                const items = block.querySelectorAll('li');
+                if (items[{target_idx}]) items[{target_idx}].click();
+            }})()
+        """)
+
+        await asyncio.sleep(self.click_delay)
+
+        current_url: str = await self.page.evaluate(
+            "window.location.href"
+        )
+        uid_found = self._uid_from_url(current_url)
+        total_jobs: int | None = await self._read_total_jobs()
+
+        uid_match = uid_found == expected_uid
+        load = (
+            classify_load(category_name, uid_found, total_jobs or 0)
+            if uid_found
+            else None
+        )
+
+        if uid_match:
+            log.info(
+                "UID check PASSED: %s == %s", uid_found, expected_uid
+            )
+        else:
+            log.warning(
+                "UID check FAILED: found=%s expected=%s",
+                uid_found, expected_uid,
+            )
+
+        return {
+            "name": category_name,
+            "uid_found": uid_found,
+            "uid_expected": expected_uid,
+            "uid_match": uid_match,
+            "total_jobs": total_jobs,
+            "load": load,
+        }
 
     async def scrape_categories(
         self,

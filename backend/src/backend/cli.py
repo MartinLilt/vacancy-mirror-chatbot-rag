@@ -10,10 +10,6 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-from sklearn.neighbors import NearestNeighbors
-
-from backend.services.embeddings import LocalEmbeddingService
 from backend.services.openai import OpenAIProfileNamingService
 from backend.services.postgres import (
     PostgresJobExportService,
@@ -347,6 +343,10 @@ def build_job_embeddings_command(
     args: argparse.Namespace,
 ) -> int:
     """Build job embeddings from normalized jobs."""
+    from backend.services.embeddings import (  # noqa: PLC0415
+        LocalEmbeddingService,
+    )
+
     db_service = PostgresJobExportService(
         db_url=args.db_url or None
     )
@@ -389,6 +389,9 @@ def build_job_embeddings_command(
 
 
 def build_job_embeddings_command_old(args: argparse.Namespace) -> int:
+    from backend.services.embeddings import (  # noqa: PLC0415
+        LocalEmbeddingService,
+    )
     input_path = Path(args.input)
     if not input_path.exists():
         raise SystemExit(f"Файл не найден: {input_path}")
@@ -436,6 +439,9 @@ def build_job_embeddings_command_old(args: argparse.Namespace) -> int:
 
 def cluster_job_embeddings_command(args: argparse.Namespace) -> int:
     """Cluster job embeddings from PostgreSQL."""
+    import numpy as np  # noqa: PLC0415
+    from sklearn.neighbors import NearestNeighbors  # noqa: PLC0415
+
     if not 0 <= args.similarity_threshold <= 1:
         raise SystemExit(
             "similarity-threshold должен быть в диапазоне "

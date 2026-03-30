@@ -41,6 +41,12 @@
 - Always handle file-not-found and network errors gracefully
 - Raise specific exceptions with clear messages, never silent `except: pass`
 
+## Terminal Commands
+
+- **Never run blocking terminal processes** that prevent the user from continuing the chat
+- Always use `isBackground: true` for long-running processes (servers, watchers, docker-compose up, bot processes, etc.)
+- If a command must run in the foreground, warn the user first and confirm before running it
+
 ## Do Not
 
 - Do not use `requests` library — use `urllib` or `httpx`

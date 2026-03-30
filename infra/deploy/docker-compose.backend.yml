@@ -1,0 +1,66 @@
+# Backend stack — runs on server-backend
+# Deployed to /etc/vacancy-mirror/docker-compose.yml by provision.sh
+#
+# Services:
+#   postgres  — persistent DB (pgvector)
+#   backend   — Telegram bot (pulls from ghcr.io)
+#   api       — FastAPI (web/api, pulls from ghcr.io)
+#   nginx     — reverse proxy: 80/443 → api:8000
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    env_file:
+      - /etc/vacancy-mirror/backend.env
+    environment:
+      POSTGRES_DB: vacancy_mirror
+      POSTGRES_USER: app
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - /etc/vacancy-mirror/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    expose:
+      - "5432"
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d vacancy_mirror"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
+    restart: unless-stopped
+    env_file:
+      - /etc/vacancy-mirror/backend.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m backend.cli telegram-bot
+
+  api:
+    image: ghcr.io/${GHCR_USER}/vacancy-mirror-api:latest
+    restart: unless-stopped
+    env_file:
+      - /etc/vacancy-mirror/backend.env
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /etc/vacancy-mirror/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - api
+
+volumes:
+  postgres-data:

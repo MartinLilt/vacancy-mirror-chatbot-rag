@@ -87,3 +87,37 @@ CREATE TABLE IF NOT EXISTS job_samples (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (profile_id, jobid)
 );
+
+-- ---------------------------------------------------------------------------
+-- raw_jobs — raw scraped vacancy records, one row per Upwork job posting.
+-- Populated by the scraper container before any clustering / embedding.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS raw_jobs (
+    id BIGSERIAL PRIMARY KEY,
+    scrape_run_id BIGINT REFERENCES scrape_runs (id) ON DELETE SET NULL,
+    category_uid TEXT NOT NULL,
+    category_name TEXT NOT NULL,
+    job_uid TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    published_at TIMESTAMPTZ,
+    job_type SMALLINT,                   -- 1 = fixed, 2 = hourly
+    duration_label TEXT,                 -- e.g. 'Less than 1 month'
+    client_country TEXT,
+    client_payment_verified BOOLEAN,
+    client_total_spent NUMERIC(14, 2),
+    client_total_reviews INT,
+    client_total_feedback NUMERIC(5, 2),
+    enterprise_job BOOLEAN NOT NULL DEFAULT FALSE,
+    skills TEXT[],                       -- attrs[].prefLabel
+    hourly_budget_min NUMERIC(10, 2),
+    hourly_budget_max NUMERIC(10, 2),
+    weekly_budget NUMERIC(12, 2),
+    scraped_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (category_uid, job_uid)
+);
+
+-- Index for fast lookups by category and scrape run.
+CREATE INDEX IF NOT EXISTS raw_jobs_category_uid_idx ON raw_jobs (category_uid);
+
+CREATE INDEX IF NOT EXISTS raw_jobs_scrape_run_id_idx ON raw_jobs (scrape_run_id);
