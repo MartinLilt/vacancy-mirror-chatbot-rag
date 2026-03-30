@@ -1,4 +1,21 @@
+import type { Metadata } from "next";
 import Link from "next/link";
+
+export const metadata: Metadata = {
+  title: "Features",
+  description:
+    "Seven tools for Upwork freelancers: weekly market trends, " +
+    "AI assistant, profile optimisation, portfolio agent, and " +
+    "skills reports — free and paid plans.",
+  alternates: { canonical: "https://vacancy-mirror.com/benefits" },
+  openGraph: {
+    url: "https://vacancy-mirror.com/benefits",
+    title: "Features | Vacancy Mirror",
+    description:
+      "Seven tools for Upwork freelancers: weekly market trends, " +
+      "AI assistant, profile optimisation, and more.",
+  },
+};
 
 const features = [
   {

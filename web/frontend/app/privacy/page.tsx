@@ -1,3 +1,22 @@
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "Privacy Policy",
+  description:
+    "Vacancy Mirror privacy policy and terms of use. " +
+    "We analyse public market data only. " +
+    "Effective March 29, 2026.",
+  alternates: { canonical: "https://vacancy-mirror.com/privacy" },
+  openGraph: {
+    url: "https://vacancy-mirror.com/privacy",
+    title: "Privacy Policy | Vacancy Mirror",
+    description:
+      "Vacancy Mirror privacy policy and terms of use. " +
+      "Effective March 29, 2026.",
+  },
+  robots: { index: false, follow: false },
+};
+
 export default function PrivacyPage() {
   return (
     <main className="min-h-screen bg-gray-950 text-white">

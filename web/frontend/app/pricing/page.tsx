@@ -1,9 +1,23 @@
-"use client";
+import type { Metadata } from "next";
 
-const PLUS_URL =
-  process.env.NEXT_PUBLIC_STRIPE_PLUS_URL ?? "#";
-const PRO_PLUS_URL =
-  process.env.NEXT_PUBLIC_STRIPE_PRO_PLUS_URL ?? "#";
+export const metadata: Metadata = {
+  title: "Pricing",
+  description:
+    "Free, Plus ($9.99/mo) and Pro Plus ($19.99/mo) plans for " +
+    "Upwork freelancers. Start free, upgrade for AI profile advice " +
+    "and portfolio recommendations.",
+  alternates: { canonical: "https://vacancy-mirror.com/pricing" },
+  openGraph: {
+    url: "https://vacancy-mirror.com/pricing",
+    title: "Pricing | Vacancy Mirror",
+    description:
+      "Free, Plus and Pro Plus plans for Upwork freelancers. " +
+      "Cancel anytime.",
+  },
+};
+
+const PLUS_URL = process.env.NEXT_PUBLIC_STRIPE_PLUS_URL ?? "#";
+const PRO_PLUS_URL = process.env.NEXT_PUBLIC_STRIPE_PRO_PLUS_URL ?? "#";
 
 const plans = [
   {
