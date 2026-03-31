@@ -618,14 +618,14 @@ class UpworkScraperService:
                 "Loading page %d (attempt %d/%d): %s",
                 page_num, attempt, self.max_retries, url,
             )
-            
+
             # Get HTML from FlareSolverr (bypasses Cloudflare)
             try:
                 solution = await self._solve_cloudflare_with_flaresolverr(
                     url
                 )
                 html = solution.get("html", "")
-                
+
                 if not html:
                     log.warning(
                         "FlareSolverr returned empty HTML "
@@ -635,17 +635,17 @@ class UpworkScraperService:
                     if attempt < self.max_retries:
                         await asyncio.sleep(self.retry_delay)
                     continue
-                
+
                 # Load HTML into nodriver page to execute JavaScript
                 await self.page.evaluate(
                     f"document.open(); "
                     f"document.write({json.dumps(html)}); "
                     f"document.close();"
                 )
-                
+
                 # Wait for JS to execute
                 await asyncio.sleep(2)
-                
+
                 # Extract __NUXT__ via JavaScript
                 nuxt = await self._get_nuxt()
                 if nuxt is None:
@@ -657,7 +657,7 @@ class UpworkScraperService:
                     if attempt < self.max_retries:
                         await asyncio.sleep(self.retry_delay)
                     continue
-                
+
                 jobs = _extract_jobs(nuxt)
                 if not jobs and attempt < self.max_retries:
                     log.warning(
@@ -667,14 +667,14 @@ class UpworkScraperService:
                     )
                     await asyncio.sleep(self.retry_delay)
                     continue
-                
+
                 # Random delay between pages
                 delay = self._random_delay()
                 log.debug("Waiting %.2fs before next page...", delay)
                 await asyncio.sleep(delay)
-                
+
                 return jobs
-                
+
             except Exception as e:
                 log.error(
                     "Error loading page %d (attempt %d/%d): %s",
