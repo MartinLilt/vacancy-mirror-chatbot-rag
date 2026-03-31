@@ -594,33 +594,6 @@ class UpworkScraperService:
             log.error("JSON parse error in __NUXT__: %s", exc)
             return None
 
-    def _extract_nuxt_from_html(self, html: str) -> dict[str, Any] | None:
-        """Extract window.__NUXT__ from HTML string.
-
-        Args:
-            html: Full page HTML from FlareSolverr
-
-        Returns:
-            Parsed dict, or None if unavailable.
-        """
-        import re
-        
-        # Find <script>window.__NUXT__={...}</script>
-        match = re.search(
-            r'<script[^>]*>window\.__NUXT__\s*=\s*({.*?})\s*</script>',
-            html,
-            re.DOTALL,
-        )
-        if not match:
-            log.debug("No __NUXT__ script found in HTML")
-            return None
-        
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError as exc:
-            log.error("JSON parse error in __NUXT__: %s", exc)
-            return None
-
     async def _load_page_with_retry(
         self,
         url: str,
@@ -628,7 +601,8 @@ class UpworkScraperService:
     ) -> list[dict[str, Any]] | None:
         """Load a single page, retrying on failure.
 
-        Uses FlareSolverr HTML directly instead of loading through browser.
+        Uses FlareSolverr to get HTML, then loads it in nodriver browser
+        to execute JavaScript and extract __NUXT__.
 
         Args:
             url: Full Upwork search URL.
@@ -637,6 +611,8 @@ class UpworkScraperService:
         Returns:
             List of job dicts, or None if all retries failed.
         """
+        assert self.page is not None
+
         for attempt in range(1, self.max_retries + 1):
             log.debug(
                 "Loading page %d (attempt %d/%d): %s",
@@ -645,7 +621,9 @@ class UpworkScraperService:
             
             # Get HTML from FlareSolverr (bypasses Cloudflare)
             try:
-                solution = await self._solve_cloudflare_with_flaresolverr(url)
+                solution = await self._solve_cloudflare_with_flaresolverr(
+                    url
+                )
                 html = solution.get("html", "")
                 
                 if not html:
@@ -658,11 +636,21 @@ class UpworkScraperService:
                         await asyncio.sleep(self.retry_delay)
                     continue
                 
-                # Extract __NUXT__ from HTML
-                nuxt = self._extract_nuxt_from_html(html)
+                # Load HTML into nodriver page to execute JavaScript
+                await self.page.evaluate(
+                    f"document.open(); "
+                    f"document.write({json.dumps(html)}); "
+                    f"document.close();"
+                )
+                
+                # Wait for JS to execute
+                await asyncio.sleep(2)
+                
+                # Extract __NUXT__ via JavaScript
+                nuxt = await self._get_nuxt()
                 if nuxt is None:
                     log.warning(
-                        "No __NUXT__ in FlareSolverr HTML "
+                        "No __NUXT__ after loading FlareSolverr HTML "
                         "for page %d (attempt %d/%d)",
                         page_num, attempt, self.max_retries,
                     )
@@ -673,7 +661,8 @@ class UpworkScraperService:
                 jobs = _extract_jobs(nuxt)
                 if not jobs and attempt < self.max_retries:
                     log.warning(
-                        "Empty jobs on page %d (attempt %d/%d), retrying.",
+                        "Empty jobs on page %d (attempt %d/%d), "
+                        "retrying.",
                         page_num, attempt, self.max_retries,
                     )
                     await asyncio.sleep(self.retry_delay)
