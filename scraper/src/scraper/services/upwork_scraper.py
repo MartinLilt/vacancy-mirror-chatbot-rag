@@ -157,6 +157,9 @@ class UpworkScraperService:
         max_retries: int = 3,
         retry_delay: float = 10.0,
         checkpoint_dir: Path | None = None,
+        user_data_dir: Path | None = None,
+        proxy_url: str | None = None,
+        cookie_backup_path: Path | None = None,
     ) -> None:
         """Initialise the scraper.
 
@@ -172,6 +175,16 @@ class UpworkScraperService:
             retry_delay: Seconds to wait between retries.
             checkpoint_dir: Directory to save per-page checkpoint JSON
                 files.  Defaults to ``data/checkpoints/``.
+            user_data_dir: Chrome User Data Directory for session
+                persistence (cookies, localStorage, etc.).  If None,
+                Chrome runs in ephemeral mode.
+            proxy_url: Residential proxy URL with sticky session support.
+                Format: ``http://user:pass@proxy.com:port``.  If None,
+                uses server's direct IP.  Recommended: IPRoyal residential
+                proxy with 24-hour session rotation.
+            cookie_backup_path: Path to save/load cookies as JSON backup
+                for disaster recovery.  Defaults to
+                ``data/session_cookies.json``.
         """
         if page_delay_min > page_delay_max:
             raise ValueError(
@@ -184,6 +197,11 @@ class UpworkScraperService:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.checkpoint_dir = checkpoint_dir or Path("data/checkpoints")
+        self.user_data_dir = user_data_dir
+        self.proxy_url = proxy_url
+        self.cookie_backup_path = (
+            cookie_backup_path or Path("data/session_cookies.json")
+        )
         self.browser: uc.Browser | None = None
         self.page: uc.Tab | None = None
 
@@ -198,17 +216,161 @@ class UpworkScraperService:
     # Browser lifecycle
     # ------------------------------------------------------------------
 
+    async def _apply_stealth_patches(self) -> None:
+        """Remove webdriver flags and add realistic browser fingerprint.
+
+        Executes CDP commands to:
+        - Hide ``navigator.webdriver`` flag.
+        - Add fake plugins (Chrome PDF Viewer, etc.).
+        - Add fake languages (en-US, en).
+        - Override user agent to look like real Chrome.
+
+        Must be called AFTER browser starts but BEFORE loading any pages.
+        """
+        assert self.page is not None
+        log.debug("Applying stealth patches...")
+
+        cdp_page = __import__("nodriver.cdp").cdp.page
+        await self.page.send(
+            cdp_page.add_script_to_evaluate_on_new_document(
+                source="""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [
+                        {name: 'Chrome PDF Plugin'},
+                        {name: 'Chrome PDF Viewer'},
+                        {name: 'Native Client'}
+                    ]
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+                """
+            )
+        )
+        log.debug("Stealth patches applied.")
+
+    async def _import_cookies(self) -> None:
+        """Load cookies from JSON backup file if it exists.
+
+        Reads ``cookie_backup_path`` and injects cookies into the
+        current browser session via CDP.  Useful for restoring sessions
+        after container restart.
+        """
+        assert self.page is not None
+        if not self.cookie_backup_path.exists():
+            log.debug(
+                "No cookie backup found at %s — starting fresh.",
+                self.cookie_backup_path,
+            )
+            return
+
+        log.info("Importing cookies from %s...", self.cookie_backup_path)
+        try:
+            cookies_data: list[dict[str, Any]] = json.loads(
+                self.cookie_backup_path.read_text(encoding="utf-8")
+            )
+            cdp_cookies = __import__("nodriver.cdp").cdp.network
+            for cookie in cookies_data:
+                await self.page.send(
+                    cdp_cookies.set_cookie(
+                        name=cookie["name"],
+                        value=cookie["value"],
+                        domain=cookie.get("domain", ".upwork.com"),
+                        path=cookie.get("path", "/"),
+                        secure=cookie.get("secure", True),
+                        http_only=cookie.get("httpOnly", False),
+                        same_site=(
+                            cdp_cookies.CookieSameSite(
+                                cookie.get("sameSite", "Lax")
+                            )
+                            if cookie.get("sameSite")
+                            else None
+                        ),
+                    )
+                )
+            log.info("Imported %d cookies.", len(cookies_data))
+        except (json.JSONDecodeError, OSError, KeyError) as exc:
+            log.warning(
+                "Failed to import cookies from %s: %s",
+                self.cookie_backup_path,
+                exc,
+            )
+
+    async def _export_cookies(self) -> None:
+        """Save all cookies from current session to JSON backup file.
+
+        Retrieves cookies via CDP and writes them to
+        ``cookie_backup_path`` for later restoration.  Called
+        automatically on browser shutdown.
+        """
+        assert self.page is not None
+        log.info("Exporting cookies to %s...", self.cookie_backup_path)
+        try:
+            cdp_cookies = __import__("nodriver.cdp").cdp.network
+            cookies_raw = await self.page.send(
+                cdp_cookies.get_all_cookies()
+            )
+            cookies_data: list[dict[str, Any]] = [
+                {
+                    "name": c.name,
+                    "value": c.value,
+                    "domain": c.domain,
+                    "path": c.path,
+                    "secure": c.secure,
+                    "httpOnly": c.http_only,
+                    "sameSite": (
+                        c.same_site.value if c.same_site else None
+                    ),
+                }
+                for c in cookies_raw
+            ]
+            self.cookie_backup_path.parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            self.cookie_backup_path.write_text(
+                json.dumps(cookies_data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            log.info("Exported %d cookies.", len(cookies_data))
+        except Exception as exc:
+            log.warning("Failed to export cookies: %s", exc)
+
     async def start_browser(self) -> None:
-        """Launch Chrome and open a blank tab."""
+        """Launch Chrome and open a blank tab.
+
+        If ``user_data_dir`` is set, persists session data (cookies,
+        localStorage) across restarts.  If ``proxy_url`` is set, routes
+        all traffic through the proxy.  Applies stealth patches and
+        imports cookies from backup if available.
+        """
+        browser_args: list[str] = []
+        if self.proxy_url:
+            browser_args.append(f"--proxy-server={self.proxy_url}")
+            log.info("Using proxy: %s", self.proxy_url)
+
         self.browser = await uc.start(
-            browser_executable_path=self.chrome_path
+            browser_executable_path=self.chrome_path,
+            user_data_dir=(
+                str(self.user_data_dir) if self.user_data_dir else None
+            ),
+            browser_args=browser_args if browser_args else None,
         )
         self.page = await self.browser.get("about:blank")
+        await self._apply_stealth_patches()
+        await self._import_cookies()
         log.info("Browser started.")
 
     async def stop_browser(self) -> None:
-        """Close the browser gracefully."""
+        """Close the browser gracefully.
+
+        Exports cookies to backup file before shutdown for session
+        restoration on next run.
+        """
         if self.browser:
+            await self._export_cookies()
             self.browser.stop()
             self.browser = None
             self.page = None
@@ -243,6 +405,33 @@ class UpworkScraperService:
                 await asyncio.sleep(2)
                 return
             await asyncio.sleep(1)
+
+    async def scrape_page(
+        self,
+        category_uid: str,
+        page: int,
+        *,
+        extra_params: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Scrape a single page of job listings.
+
+        Args:
+            category_uid: Upwork category UID.
+            page: Page number (1-based).
+            extra_params: Optional extra query parameters.
+
+        Returns:
+            List of job dicts from this page.
+        """
+        url = _build_url(category_uid, page, extra_params)
+        jobs = await self._load_page_with_retry(url, page)
+
+        if jobs is None:
+            log.error(f"Failed to load page {page}")
+            return []
+
+        log.info(f"Page {page}: fetched {len(jobs)} jobs")
+        return jobs
 
     # ------------------------------------------------------------------
     # Checkpoint helpers
@@ -610,10 +799,8 @@ class UpworkScraperService:
 #: Base URL used to open the Upwork jobs search page with the
 #: category filter visible in the sidebar.  No search query is set so
 #: that all top-level categories appear in the filter dropdown.
-_CATEGORY_SEARCH_BASE = (
-    "https://www.upwork.com/nx/search/jobs/"
-    "?per_page=50"
-)
+#: No query parameters needed — we only read metadata from __NUXT__.
+_CATEGORY_SEARCH_BASE = "https://www.upwork.com/nx/search/jobs/"
 
 #: JS selector for the categories filter block.
 _CAT_BLOCK_SEL = '[filtername="categories"]'

@@ -1,11 +1,13 @@
 FROM python:3.13-slim
 
-# Install Chromium + all runtime dependencies in one layer.
+# Install Chromium + cron + jq + all runtime dependencies in one layer.
 # Chromium works on both amd64 and arm64 (Apple Silicon via Docker Desktop).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-driver \
+    cron \
     curl \
+    jq \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -40,11 +42,24 @@ WORKDIR /app
 
 COPY pyproject.toml .
 COPY src/ src/
+COPY scripts/ scripts/
+COPY crontab /etc/cron.d/scraper-cron
+COPY entrypoint.sh /app/entrypoint.sh
 
+# Install Python dependencies
 RUN pip install --no-cache-dir -e .
+
+# Setup cron
+RUN chmod 0644 /etc/cron.d/scraper-cron && \
+    crontab /etc/cron.d/scraper-cron && \
+    chmod +x /app/entrypoint.sh && \
+    chmod +x /app/scripts/scraper_runner.sh
+
+# Create state directory (will be mounted as volume)
+RUN mkdir -p /app/data
 
 ENV CHROME_PATH=/usr/bin/chromium
 ENV LOG_LEVEL=INFO
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "scraper.cli"]
+CMD ["/app/entrypoint.sh"]

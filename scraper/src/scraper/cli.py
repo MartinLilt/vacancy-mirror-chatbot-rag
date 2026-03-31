@@ -79,12 +79,79 @@ def _parse_args() -> argparse.Namespace:
         help=f"Max pages to scrape (default: {MAX_ALLOWED_PAGE}).",
     )
     scrape_p.add_argument(
+        "--start-page",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Start from page N (for resume from checkpoint).",
+    )
+    scrape_p.add_argument(
+        "--delay-min",
+        type=int,
+        default=30,
+        metavar="SEC",
+        help="Minimum delay between pages in seconds (default: 30).",
+    )
+    scrape_p.add_argument(
+        "--delay-max",
+        type=int,
+        default=45,
+        metavar="SEC",
+        help="Maximum delay between pages in seconds (default: 45).",
+    )
+    scrape_p.add_argument(
+        "--stop-at-hour",
+        type=int,
+        default=22,
+        metavar="HOUR",
+        help="Stop scraping at hour N (24h format, default: 22).",
+    )
+    scrape_p.add_argument(
+        "--max-runtime-minutes",
+        type=int,
+        default=None,
+        metavar="MIN",
+        help=(
+            "Maximum runtime in minutes (e.g., 45). "
+            "Scraper will stop after this duration to avoid overlaps. "
+            "If not set, runs until completion or stop-at-hour."
+        ),
+    )
+    scrape_p.add_argument(
         "--db-url",
         default=None,
         metavar="URL",
         help=(
             "PostgreSQL connection URL. "
             "Falls back to DATABASE_URL env var."
+        ),
+    )
+    scrape_p.add_argument(
+        "--user-data-dir",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Chrome User Data Directory for session persistence. "
+            "If not set, Chrome runs in ephemeral mode."
+        ),
+    )
+    scrape_p.add_argument(
+        "--proxy-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "Residential proxy URL (format: http://user:pass@host:port). "
+            "If not set, uses server's direct IP. "
+            "Falls back to PROXY_URL env var."
+        ),
+    )
+    scrape_p.add_argument(
+        "--cookie-backup",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to save/load cookies as JSON backup. "
+            "Default: data/session_cookies.json"
         ),
     )
 
@@ -184,13 +251,38 @@ async def _cmd_scrape_categories() -> None:
 async def _cmd_scrape(args: argparse.Namespace) -> None:
     """Scrape job listings for a single category, save to PostgreSQL.
 
-    After scraping, prints all collected jobs to stdout so the user
-    can inspect the raw data and decide on the final output format.
+    Supports:
+    - Resume from checkpoint (--start-page)
+    - Random delays between pages (--delay-min, --delay-max)
+    - Stop at specific hour (--stop-at-hour)
     """
+    import random
+    from datetime import datetime
+    from scraper.state import ScraperState
+
     db_url: str | None = (
         args.db_url
         if hasattr(args, "db_url") and args.db_url
         else __import__("os").environ.get("DATABASE_URL")
+    )
+
+    # Resolve proxy URL from CLI arg or env var
+    proxy_url: str | None = (
+        args.proxy_url
+        if hasattr(args, "proxy_url") and args.proxy_url
+        else __import__("os").environ.get("PROXY_URL")
+    )
+
+    # Resolve user_data_dir, cookie_backup from CLI
+    user_data_dir = (
+        __import__("pathlib").Path(args.user_data_dir)
+        if hasattr(args, "user_data_dir") and args.user_data_dir
+        else None
+    )
+    cookie_backup = (
+        __import__("pathlib").Path(args.cookie_backup)
+        if hasattr(args, "cookie_backup") and args.cookie_backup
+        else None
     )
 
     # Resolve category name from UID (best-effort, for DB record).
@@ -200,6 +292,22 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
     category_name: str = uid_to_name.get(
         args.uid, args.label or args.uid
     )
+
+    # Initialize state manager
+    state = ScraperState(
+        category_uid=args.uid,
+        category_name=category_name,
+    )
+
+    # Monday? Reset state
+    if datetime.now().weekday() == 0:  # 0 = Monday
+        log.info("Monday detected — resetting state for new week")
+        state.reset_for_new_week()
+
+    # Load checkpoint
+    checkpoint = state.load_checkpoint()
+    start_page = max(args.start_page, checkpoint.get("current_page", 1))
+    log.info(f"Starting from page {start_page}")
 
     db: ScraperPostgresService | None = None
     run_id: int | None = None
@@ -219,7 +327,13 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
             "DATABASE_URL not set — results will NOT be saved to DB."
         )
 
-    service = UpworkScraperService()
+    service = UpworkScraperService(
+        page_delay_min=float(args.delay_min),
+        page_delay_max=float(args.delay_max),
+        user_data_dir=user_data_dir,
+        proxy_url=proxy_url,
+        cookie_backup_path=cookie_backup,
+    )
     await service.start_browser()
     first_url = (
         f"https://www.upwork.com/nx/search/jobs/"
@@ -229,38 +343,104 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
 
     status = "failed"
     jobs: list[dict] = []
+    pages_scraped = 0
+
+    # Track start time for runtime limit
+    scrape_start_time = datetime.now()
+    max_runtime_seconds = (
+        args.max_runtime_minutes * 60
+        if args.max_runtime_minutes
+        else None
+    )
+
     try:
-        jobs = await service.scrape_category(
-            category_uid=args.uid,
-            max_pages=args.max_pages,
-        )
+        # Scrape page by page with delays and time checks
+        for page in range(start_page, args.max_pages + 1):
+            # Check runtime limit (if set)
+            if max_runtime_seconds is not None:
+                elapsed_seconds = (
+                    datetime.now() - scrape_start_time
+                ).total_seconds()
+                if elapsed_seconds >= max_runtime_seconds:
+                    log.info(
+                        f"Reached runtime limit "
+                        f"({args.max_runtime_minutes} min), "
+                        f"stopping at page {page - 1}"
+                    )
+                    break
+
+            # Check if we should stop (time limit)
+            current_hour = datetime.now().hour
+            if current_hour >= args.stop_at_hour:
+                log.info(
+                    f"Reached stop hour {args.stop_at_hour}:00, "
+                    f"stopping at page {page - 1}"
+                )
+                break
+
+            log.info(
+                f"Scraping page {page}/{args.max_pages} "
+                f"(hour: {current_hour}:xx)"
+            )
+
+            # Scrape single page
+            page_jobs = await service.scrape_page(
+                category_uid=args.uid,
+                page=page,
+            )
+
+            if not page_jobs:
+                log.warning(f"No jobs on page {page}, stopping")
+                break
+
+            jobs.extend(page_jobs)
+            pages_scraped = page
+
+            # Save checkpoint after each page
+            state.save_checkpoint(
+                current_page=page,
+                total_pages=args.max_pages,
+                level=1,  # TODO: detect level dynamically
+                completed=(page >= args.max_pages),
+            )
+
+            # Insert to DB immediately (incremental)
+            if db is not None and run_id is not None:
+                inserted = db.insert_raw_jobs(
+                    jobs=page_jobs,
+                    scrape_run_id=run_id,
+                    category_uid=args.uid,
+                    category_name=category_name,
+                )
+                log.info(f"Inserted {inserted} jobs from page {page}")
+
+            # Delay before next page (except on last page)
+            if page < args.max_pages:
+                delay = random.randint(args.delay_min, args.delay_max)
+                log.info(f"Waiting {delay} seconds...")
+                await __import__("asyncio").sleep(delay)
+
         status = "done"
+
     except Exception as exc:
         log.error("Scraping error: %s", exc)
+
     finally:
         await service.stop_browser()
 
-    inserted = 0
     if db is not None and run_id is not None:
-        if jobs:
-            inserted = db.insert_raw_jobs(
-                jobs=jobs,
-                scrape_run_id=run_id,
-                category_uid=args.uid,
-                category_name=category_name,
-            )
         db.finish_scrape_run(
             run_id=run_id,
-            pages_collected=args.max_pages,
-            jobs_collected=inserted,
+            pages_collected=pages_scraped,
+            jobs_collected=len(jobs),
             status=status,
         )
         db.close()
 
     log.info(
-        "Scrape complete: %d jobs collected, %d inserted to DB.",
+        "Scrape complete: %d jobs collected from %d pages.",
         len(jobs),
-        inserted,
+        pages_scraped,
     )
 
     # ── Print raw job list for inspection ─────────────────────────

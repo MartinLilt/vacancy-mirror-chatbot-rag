@@ -20,7 +20,7 @@ services:
       retries: 5
 
   backend:
-    build: ./backend
+    image: ghcr.io/martinlilt/vacancy-mirror-backend:latest
     container_name: backend
     restart: unless-stopped
     environment:
@@ -34,13 +34,26 @@ services:
     command: python -m backend.cli telegram-bot
 
   scraper:
-    build: ./scraper
+    image: ghcr.io/martinlilt/vacancy-mirror-scraper:latest
     container_name: scraper
     restart: "no"
     environment:
-      DB_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
+      # Database connection
+      DATABASE_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
+
+      # Residential proxy (IPRoyal with 24h sticky session)
+      # Format: http://user_session-ID_lifetime-1440:pass@geo.iproyal.com:12321
       PROXY_URL: ${PROXY_URL:-}
+
+      # Chrome session persistence
+      CHROME_USER_DATA_DIR: /app/data/chrome_profile
+      COOKIE_BACKUP_PATH: /app/data/session_cookies.json
+
+      # Category UID (for single-category runs)
       CATEGORY_UID: ${CATEGORY_UID:-}
+    volumes:
+      # Persist Chrome session + cookies + checkpoints across restarts
+      - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
