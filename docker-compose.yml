@@ -33,16 +33,27 @@ services:
         condition: service_healthy
     command: python -m backend.cli telegram-bot
 
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: info
+      LOG_HTML: false
+      CAPTCHA_SOLVER: none
+      TZ: UTC
+    ports:
+      - "8191:8191"
+
   scraper:
     image: ghcr.io/martinlilt/vacancy-mirror-scraper:latest
     container_name: scraper
     restart: "no"
     environment:
-      # Database connection
-      DATABASE_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
+      # Database connection - use DATABASE_URL from .env for external server
+      DATABASE_URL: ${DATABASE_URL}
 
-      # Residential proxy (IPRoyal with 24h sticky session)
-      # Format: http://user_session-ID_lifetime-1440:pass@geo.iproyal.com:12321
+      # Residential proxy (Webshare rotating)
       PROXY_URL: ${PROXY_URL:-}
 
       # Chrome session persistence
@@ -51,13 +62,17 @@ services:
 
       # Category UID (for single-category runs)
       CATEGORY_UID: ${CATEGORY_UID:-}
+
+      # FlareSolverr API endpoint
+      FLARESOLVERR_URL: http://flaresolverr:8191/v1
     volumes:
       # Persist Chrome session + cookies + checkpoints across restarts
       - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
-    command: python -m scraper.cli
+      flaresolverr:
+        condition: service_started
 
 volumes:
   postgres-data:

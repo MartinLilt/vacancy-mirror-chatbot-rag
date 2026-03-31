@@ -6,6 +6,8 @@ scrape-categories   Scrape UIDs + job counts for all top-level categories.
 scrape              Scrape job listings for a specific category UID.
 inspect-category    Open the Upwork dropdown, click one category, verify
                     its UID against our registry and print a load report.
+warmup              Warm up browser session by visiting public pages to
+                    establish cookies and avoid Cloudflare detection.
 
 Usage (inside container)::
 
@@ -153,6 +155,37 @@ def _parse_args() -> argparse.Namespace:
             "Path to save/load cookies as JSON backup. "
             "Default: data/session_cookies.json"
         ),
+    )
+
+    # ── warmup ───────────────────────────────────────────────────────
+    warmup_p = sub.add_parser(
+        "warmup",
+        help=(
+            "Warm up browser session by visiting public pages "
+            "(Upwork + general web) to establish cookies and avoid "
+            "Cloudflare detection before scraping."
+        ),
+    )
+    warmup_p.add_argument(
+        "--proxy-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "Residential proxy URL (format: http://user:pass@host:port). "
+            "Falls back to PROXY_URL env var."
+        ),
+    )
+    warmup_p.add_argument(
+        "--user-data-dir",
+        default=None,
+        metavar="PATH",
+        help="Chrome User Data Directory for session persistence.",
+    )
+    warmup_p.add_argument(
+        "--cookie-backup",
+        default=None,
+        metavar="PATH",
+        help="Path to save cookies as JSON backup.",
     )
 
     # ── inspect-category ─────────────────────────────────────────────
@@ -335,11 +368,6 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
         cookie_backup_path=cookie_backup,
     )
     await service.start_browser()
-    first_url = (
-        f"https://www.upwork.com/nx/search/jobs/"
-        f"?category2_uid={args.uid}&per_page=50&page=1"
-    )
-    await service.manual_cloudflare_pass(first_url)
 
     status = "failed"
     jobs: list[dict] = []
@@ -588,6 +616,108 @@ async def _cmd_inspect_category(args: argparse.Namespace) -> None:
         sys.exit(2)
 
 
+async def _cmd_warmup(args: argparse.Namespace) -> None:
+    """Warm up browser session by visiting public pages."""
+    import os
+    import random
+    from pathlib import Path
+
+    log.info("🔥 Starting browser warmup session...")
+
+    # Get config from args or env
+    proxy_url = args.proxy_url or os.getenv("PROXY_URL")
+    user_data_dir_str = args.user_data_dir or os.getenv(
+        "CHROME_USER_DATA_DIR"
+    )
+    cookie_backup_str = args.cookie_backup or os.getenv(
+        "COOKIE_BACKUP_PATH", "data/session_cookies.json"
+    )
+
+    user_data_dir = Path(user_data_dir_str) if user_data_dir_str else None
+    cookie_backup = Path(cookie_backup_str)
+
+    # Warmup URLs - mix of Upwork pages and general web
+    upwork_pages = [
+        "https://www.upwork.com/",
+        "https://www.upwork.com/i/how-it-works/client/",
+        "https://www.upwork.com/talent-marketplace/",
+        "https://www.upwork.com/agencies",
+        "https://www.upwork.com/business-plus",
+        "https://www.upwork.com/anyhire",
+        "https://www.upwork.com/contract-to-hire/client",
+        "https://www.upwork.com/hire/",
+        "https://www.upwork.com/i/how-it-works/freelancer/",
+        "https://www.upwork.com/freelance-jobs/",
+    ]
+
+    # Add some general public sites for more natural behavior
+    general_pages = [
+        "https://www.wikipedia.org/",
+        "https://news.ycombinator.com/",
+        "https://www.reddit.com/",
+    ]
+
+    # Shuffle and pick 5-7 Upwork pages + 1-2 general pages
+    random.shuffle(upwork_pages)
+    random.shuffle(general_pages)
+    warmup_urls = upwork_pages[:6] + general_pages[:2]
+    random.shuffle(warmup_urls)  # Mix them together
+
+    log.info("Selected %d pages for warmup", len(warmup_urls))
+
+    # Create scraper service
+    service = UpworkScraperService(
+        chrome_path=os.getenv(
+            "CHROME_PATH",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ),
+        user_data_dir=user_data_dir,
+        proxy_url=proxy_url,
+        cookie_backup_path=cookie_backup,
+        page_delay_min=3,
+        page_delay_max=8,
+    )
+
+    try:
+        # Start browser
+        await service.start_browser()
+        log.info("✅ Browser started successfully")
+
+        # Visit each warmup page
+        for idx, url in enumerate(warmup_urls, 1):
+            log.info("📄 [%d/%d] Visiting: %s", idx, len(warmup_urls), url)
+
+            try:
+                await service.page.get(url)
+
+                # Random delay between 3-8 seconds
+                delay = random.uniform(3, 8)
+                log.info("   ⏳ Waiting %.1fs...", delay)
+                await asyncio.sleep(delay)
+
+                # Simulate some scrolling on Upwork pages
+                if "upwork.com" in url and random.random() > 0.5:
+                    log.info("   📜 Simulating scroll...")
+                    await service.page.evaluate(
+                        "window.scrollTo(0, document.body.scrollHeight / 2)"
+                    )
+                    await asyncio.sleep(random.uniform(1, 2))
+
+            except Exception as e:
+                log.warning("   ⚠️  Failed to load %s: %s", url, e)
+                continue
+
+        log.info("🎉 Warmup complete! Session should be ready.")
+        log.info(
+            "   Cookies and session data saved to user-data-dir "
+            "and cookie backup."
+        )
+
+    finally:
+        # Stop browser and save cookies
+        await service.stop_browser()
+
+
 def main() -> None:
     """Dispatch CLI command."""
     args = _parse_args()
@@ -598,6 +728,8 @@ def main() -> None:
         asyncio.run(_cmd_scrape(args))
     elif args.command == "inspect-category":
         asyncio.run(_cmd_inspect_category(args))
+    elif args.command == "warmup":
+        asyncio.run(_cmd_warmup(args))
     else:
         log.error("Unknown command: %s", args.command)
         sys.exit(1)

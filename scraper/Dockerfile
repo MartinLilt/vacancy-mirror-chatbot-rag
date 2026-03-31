@@ -1,7 +1,8 @@
 FROM python:3.13-slim
 
-# Install Chromium + cron + jq + all runtime dependencies in one layer.
+# Install Chromium + cron + jq + runtime dependencies in one layer.
 # Chromium works on both amd64 and arm64 (Apple Silicon via Docker Desktop).
+# Headless mode is sufficient with FlareSolverr handling Cloudflare.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-driver \

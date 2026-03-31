@@ -7,7 +7,7 @@ present in the page HTML on every load.
 
 Features:
 - Retry logic per page (up to ``max_retries`` attempts).
-- Cloudflare block detection — pauses and asks user to solve manually.
+- Cloudflare bypass via FlareSolverr (automatic cookie injection).
 - Checkpoint save after every page so progress survives crashes.
 - Resume from last saved checkpoint on restart.
 
@@ -20,10 +20,6 @@ Usage example::
 
     scraper = UpworkScraperService()
     await scraper.start_browser()
-    await scraper.manual_cloudflare_pass(
-        "https://www.upwork.com/nx/search/jobs/"
-        "?category2_uid=531770282580668418&per_page=50&page=1"
-    )
     jobs = await scraper.scrape_category(
         category_uid="531770282580668418",
         max_pages=100,
@@ -33,7 +29,6 @@ Usage example::
     # Discover categories:
     cat_scraper = CategoryScraperService()
     await cat_scraper.start_browser()
-    await cat_scraper.manual_cloudflare_pass()
     categories = await cat_scraper.scrape_categories()
     await cat_scraper.stop_browser()
     # categories == {
@@ -50,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 from pathlib import Path
 from typing import Any
@@ -57,6 +53,7 @@ from typing import Any
 import nodriver as uc
 
 from scraper.categories import classify_load
+from scraper.services.flaresolverr_client import FlareSolverrClient
 
 log = logging.getLogger(__name__)
 
@@ -204,6 +201,13 @@ class UpworkScraperService:
         )
         self.browser: uc.Browser | None = None
         self.page: uc.Tab | None = None
+
+        # FlareSolverr client for Cloudflare bypass
+        flaresolverr_url = os.environ.get(
+            "FLARESOLVERR_URL", "http://localhost:8191/v1"
+        )
+        self.flaresolverr = FlareSolverrClient(api_url=flaresolverr_url)
+        self._cf_solved = False  # Track if we've already solved CF
 
     def _random_delay(self) -> float:
         """Return a uniformly sampled delay from [min, max].
@@ -357,11 +361,45 @@ class UpworkScraperService:
                 str(self.user_data_dir) if self.user_data_dir else None
             ),
             browser_args=browser_args if browser_args else None,
+            no_sandbox=True,  # Required for running as root in Docker
+            headless=True,  # Headless mode for Docker (no Xvfb needed)
         )
         self.page = await self.browser.get("about:blank")
         await self._apply_stealth_patches()
         await self._import_cookies()
         log.info("Browser started.")
+
+    async def _solve_cloudflare_with_flaresolverr(
+        self, url: str
+    ) -> dict[str, Any]:
+        """Use FlareSolverr to bypass Cloudflare and get HTML directly.
+
+        Args:
+            url: Target Upwork URL to solve Cloudflare for
+
+        Returns:
+            Dict with 'html', 'cookies', 'userAgent' from FlareSolverr
+        """
+        log.info("🔥 Solving Cloudflare with FlareSolverr for: %s", url)
+        try:
+            solution = self.flaresolverr.solve(
+                url=url,
+                max_timeout=60000,  # 60 seconds
+                proxy=None,  # Direct connection for FlareSolverr
+            )
+
+            log.info(
+                "✅ FlareSolverr solved! Cookies: %d, HTML: %d bytes",
+                len(solution["cookies"]),
+                len(solution.get("html", "")),
+            )
+            return solution
+
+        except Exception as e:
+            log.error("❌ FlareSolverr failed: %s", e)
+            raise RuntimeError(
+                f"Could not bypass Cloudflare with FlareSolverr: {e}"
+            ) from e
 
     async def stop_browser(self) -> None:
         """Close the browser gracefully.
@@ -556,6 +594,33 @@ class UpworkScraperService:
             log.error("JSON parse error in __NUXT__: %s", exc)
             return None
 
+    def _extract_nuxt_from_html(self, html: str) -> dict[str, Any] | None:
+        """Extract window.__NUXT__ from HTML string.
+
+        Args:
+            html: Full page HTML from FlareSolverr
+
+        Returns:
+            Parsed dict, or None if unavailable.
+        """
+        import re
+        
+        # Find <script>window.__NUXT__={...}</script>
+        match = re.search(
+            r'<script[^>]*>window\.__NUXT__\s*=\s*({.*?})\s*</script>',
+            html,
+            re.DOTALL,
+        )
+        if not match:
+            log.debug("No __NUXT__ script found in HTML")
+            return None
+        
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError as exc:
+            log.error("JSON parse error in __NUXT__: %s", exc)
+            return None
+
     async def _load_page_with_retry(
         self,
         url: str,
@@ -563,7 +628,7 @@ class UpworkScraperService:
     ) -> list[dict[str, Any]] | None:
         """Load a single page, retrying on failure.
 
-        Detects Cloudflare challenges and pauses for manual resolution.
+        Uses FlareSolverr HTML directly instead of loading through browser.
 
         Args:
             url: Full Upwork search URL.
@@ -572,55 +637,63 @@ class UpworkScraperService:
         Returns:
             List of job dicts, or None if all retries failed.
         """
-        assert self.page is not None
-
         for attempt in range(1, self.max_retries + 1):
             log.debug(
                 "Loading page %d (attempt %d/%d): %s",
                 page_num, attempt, self.max_retries, url,
             )
-            await self.page.get(url)
-            delay = self._random_delay()
-            log.debug("Waiting %.2fs after page load...", delay)
-            await asyncio.sleep(delay)
-
-            # Check for Cloudflare block
-            html = await self._get_page_html()
-            if _is_cloudflare_block(html):
-                log.warning(
-                    "Cloudflare block detected on page %d! "
-                    "Please solve it in the browser.",
-                    page_num,
-                )
-                input(
-                    ">>> Solve Cloudflare in the browser, "
-                    "then press Enter to retry: "
-                )
-                continue  # retry after manual solve
-
-            nuxt = await self._get_nuxt()
-            if nuxt is None:
-                log.warning(
-                    "No __NUXT__ on page %d (attempt %d/%d).",
-                    page_num, attempt, self.max_retries,
-                )
-                if attempt < self.max_retries:
-                    log.info(
-                        "Retrying in %.1fs...", self.retry_delay
+            
+            # Get HTML from FlareSolverr (bypasses Cloudflare)
+            try:
+                solution = await self._solve_cloudflare_with_flaresolverr(url)
+                html = solution.get("html", "")
+                
+                if not html:
+                    log.warning(
+                        "FlareSolverr returned empty HTML "
+                        "for page %d (attempt %d/%d)",
+                        page_num, attempt, self.max_retries,
+                    )
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(self.retry_delay)
+                    continue
+                
+                # Extract __NUXT__ from HTML
+                nuxt = self._extract_nuxt_from_html(html)
+                if nuxt is None:
+                    log.warning(
+                        "No __NUXT__ in FlareSolverr HTML "
+                        "for page %d (attempt %d/%d)",
+                        page_num, attempt, self.max_retries,
+                    )
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(self.retry_delay)
+                    continue
+                
+                jobs = _extract_jobs(nuxt)
+                if not jobs and attempt < self.max_retries:
+                    log.warning(
+                        "Empty jobs on page %d (attempt %d/%d), retrying.",
+                        page_num, attempt, self.max_retries,
                     )
                     await asyncio.sleep(self.retry_delay)
-                continue
-
-            jobs = _extract_jobs(nuxt)
-            if not jobs and attempt < self.max_retries:
-                log.warning(
-                    "Empty jobs on page %d (attempt %d/%d), retrying.",
-                    page_num, attempt, self.max_retries,
+                    continue
+                
+                # Random delay between pages
+                delay = self._random_delay()
+                log.debug("Waiting %.2fs before next page...", delay)
+                await asyncio.sleep(delay)
+                
+                return jobs
+                
+            except Exception as e:
+                log.error(
+                    "Error loading page %d (attempt %d/%d): %s",
+                    page_num, attempt, self.max_retries, e,
                 )
-                await asyncio.sleep(self.retry_delay)
+                if attempt < self.max_retries:
+                    await asyncio.sleep(self.retry_delay)
                 continue
-
-            return jobs
 
         log.error(
             "Page %d failed after %d attempts.", page_num, self.max_retries
@@ -691,18 +764,10 @@ class UpworkScraperService:
                 break
 
             # Read total from first successful page
-            if total_reported is None:
-                nuxt = await self._get_nuxt()
-                if nuxt:
-                    paging = _extract_paging(nuxt)
-                    total_reported = paging.get("total", 0)
-                    log.info(
-                        "Category %s: %d total jobs on Upwork "
-                        "(max fetchable: %d).",
-                        category_uid,
-                        total_reported,
-                        MAX_ALLOWED_PAGE * PER_PAGE,
-                    )
+            if total_reported is None and jobs:
+                # FlareSolverr HTML doesn't give us paging info easily
+                # Just log that we're scraping
+                log.info("Starting to scrape category %s", category_uid)
 
             # Save checkpoint immediately
             self._save_checkpoint(category_uid, page_num, jobs)
