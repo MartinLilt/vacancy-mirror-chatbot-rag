@@ -1,57 +1,112 @@
 #!/usr/bin/env bash
 # =============================================================================
-# push-images.sh — build & push both Docker images to ghcr.io
+# push-images.sh — build & push Docker images to ghcr.io
 #
 # Usage:
-#   export GHCR_USER=<github_username>
-#   export GHCR_TOKEN=<github_PAT_with_write:packages>
-#   bash infra/deploy/push-images.sh
+#   bash infra/deploy/push-images.sh [backend|scraper|all] [--no-cache]
 #
-# Run this from the repo root before running provision.sh or deploy.sh.
+# Required env vars (or place in .env at repo root):
+#   GHCR_USER   — GitHub username (e.g. martinlilt)
+#   GHCR_TOKEN  — GitHub PAT with write:packages scope
+#
+# Examples:
+#   bash infra/deploy/push-images.sh backend
+#   bash infra/deploy/push-images.sh all --no-cache
+#   bash infra/deploy/push-images.sh scraper
 # =============================================================================
 set -euo pipefail
 
-GHCR_USER="${GHCR_USER:?GHCR_USER is required}"
-GHCR_TOKEN="${GHCR_TOKEN:?GHCR_TOKEN is required}"
+# ---------------------------------------------------------------------------
+# Load .env from repo root if present
+# ---------------------------------------------------------------------------
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+if [[ -f "$REPO_ROOT/.env" ]]; then
+    # shellcheck disable=SC1091
+    set -o allexport
+    source "$REPO_ROOT/.env"
+    set +o allexport
+fi
+
+GHCR_USER="${GHCR_USER:?Set GHCR_USER env var or add it to .env}"
+GHCR_TOKEN="${GHCR_TOKEN:?Set GHCR_TOKEN env var or add it to .env}"
+
+TARGET="${1:-all}"      # backend | scraper | all
+NO_CACHE=""
+if [[ "${2:-}" == "--no-cache" || "${1:-}" == "--no-cache" ]]; then
+    NO_CACHE="--no-cache"
+    [[ "$TARGET" == "--no-cache" ]] && TARGET="all"
+fi
 
 BACKEND_IMAGE="ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest"
 SCRAPER_IMAGE="ghcr.io/${GHCR_USER}/vacancy-mirror-scraper:latest"
-API_IMAGE="ghcr.io/${GHCR_USER}/vacancy-mirror-api:latest"
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
 
-log "Logging into ghcr.io ..."
+[[ "$TARGET" =~ ^(backend|scraper|all)$ ]] \
+    || die "Unknown target '$TARGET'. Use: backend | scraper | all"
+
+# ---------------------------------------------------------------------------
+# Login
+# ---------------------------------------------------------------------------
+log "Logging into ghcr.io as ${GHCR_USER} ..."
 echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
 
-log "Building backend image ..."
-docker build \
-    --platform linux/amd64 \
-    -t "${BACKEND_IMAGE}" \
-    ./backend
+# ---------------------------------------------------------------------------
+# Build helpers
+# ---------------------------------------------------------------------------
+build_backend() {
+    log "Building backend image${NO_CACHE:+ (--no-cache)} ..."
+    docker build \
+        --platform linux/amd64 \
+        ${NO_CACHE} \
+        -t "${BACKEND_IMAGE}" \
+        "$REPO_ROOT/backend"
+    log "Backend image built."
+}
 
-log "Building scraper image ..."
-docker build \
-    --platform linux/amd64 \
-    -t "${SCRAPER_IMAGE}" \
-    ./scraper
+build_scraper() {
+    log "Building scraper image${NO_CACHE:+ (--no-cache)} ..."
+    docker build \
+        --platform linux/amd64 \
+        ${NO_CACHE} \
+        -t "${SCRAPER_IMAGE}" \
+        "$REPO_ROOT/scraper"
+    log "Scraper image built."
+}
 
-log "Building web/api image ..."
-docker build \
-    --platform linux/amd64 \
-    -t "${API_IMAGE}" \
-    ./web/api
+# ---------------------------------------------------------------------------
+# Push helpers
+# ---------------------------------------------------------------------------
+push_backend() {
+    log "Pushing backend image ..."
+    docker push "${BACKEND_IMAGE}"
+    log "Backend pushed: ${BACKEND_IMAGE}"
+}
 
-log "Pushing backend image ..."
-docker push "${BACKEND_IMAGE}"
+push_scraper() {
+    log "Pushing scraper image ..."
+    docker push "${SCRAPER_IMAGE}"
+    log "Scraper pushed: ${SCRAPER_IMAGE}"
+}
 
-log "Pushing scraper image ..."
-docker push "${SCRAPER_IMAGE}"
-
-log "Pushing web/api image ..."
-docker push "${API_IMAGE}"
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+case "$TARGET" in
+    backend)
+        build_backend && push_backend
+        ;;
+    scraper)
+        build_scraper && push_scraper
+        ;;
+    all)
+        build_backend
+        build_scraper
+        push_backend
+        push_scraper
+        ;;
+esac
 
 log ""
-log "=== Images pushed ==="
-log "  ${BACKEND_IMAGE}"
-log "  ${SCRAPER_IMAGE}"
-log "  ${API_IMAGE}"
+log "=== Done ==="

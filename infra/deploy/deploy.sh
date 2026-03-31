@@ -1,85 +1,93 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy.sh — pull new images and restart services on existing servers
+# deploy.sh — pull new images and restart services on the server
 #
-# Usage (after provision.sh ran once):
-#   export HCLOUD_TOKEN=<token>
-#   export GHCR_TOKEN=<github_PAT>
-#   export GHCR_USER=<github_username>
-#   bash infra/deploy/deploy.sh
+# Usage:
+#   bash infra/deploy/deploy.sh [backend|scraper|all]
 #
-# Workflow:
-#   1. Run push-images.sh first to push the new images.
-#   2. Run this script to pull and restart on both servers.
+# Required env vars (or place in .env at repo root):
+#   GHCR_USER          — GitHub username
+#   GHCR_TOKEN         — GitHub PAT with read:packages scope
+#   BACKEND_SERVER_IP  — IP of the backend server (e.g. 178.104.113.58)
+#
+# Examples:
+#   bash infra/deploy/deploy.sh backend
+#   bash infra/deploy/deploy.sh all
 # =============================================================================
 set -euo pipefail
 
-HCLOUD_TOKEN="${HCLOUD_TOKEN:?HCLOUD_TOKEN is required}"
-GHCR_TOKEN="${GHCR_TOKEN:?GHCR_TOKEN is required}"
-GHCR_USER="${GHCR_USER:?GHCR_USER is required}"
+# ---------------------------------------------------------------------------
+# Load .env from repo root if present
+# ---------------------------------------------------------------------------
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+if [[ -f "$REPO_ROOT/.env" ]]; then
+    # shellcheck disable=SC1091
+    set -o allexport
+    source "$REPO_ROOT/.env"
+    set +o allexport
+fi
+
+GHCR_TOKEN="${GHCR_TOKEN:?Set GHCR_TOKEN env var or add it to .env}"
+GHCR_USER="${GHCR_USER:?Set GHCR_USER env var or add it to .env}"
+BACKEND_SERVER_IP="${BACKEND_SERVER_IP:?Set BACKEND_SERVER_IP in .env}"
+
+TARGET="${1:-backend}"   # backend | scraper | all
 
 SSH_KEY_PATH="$HOME/.ssh/vacancy_mirror_deploy"
-BACKEND_SERVER="vacancy-mirror-backend"
-SCRAPER_SERVER="vacancy-mirror-scraper"
-
 BACKEND_IMAGE="ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest"
 SCRAPER_IMAGE="ghcr.io/${GHCR_USER}/vacancy-mirror-scraper:latest"
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
 
-server_ip() {
-    hcloud server describe "$1" \
-        --output format="{{.PublicNet.IPv4.IP}}"
-}
+[[ "$TARGET" =~ ^(backend|scraper|all)$ ]] \
+    || die "Unknown target '$TARGET'. Use: backend | scraper | all"
 
 run_remote() {
-    local ip="$1"; shift
     ssh -o StrictHostKeyChecking=no \
         -i "$SSH_KEY_PATH" \
-        "root@$ip" "$@"
+        "root@${BACKEND_SERVER_IP}" "$@"
 }
 
 # ---------------------------------------------------------------------------
-# Redeploy backend
+# Redeploy backend (restarts the running container)
 # ---------------------------------------------------------------------------
 deploy_backend() {
-    local ip
-    ip=$(server_ip "$BACKEND_SERVER")
-    log "--- Redeploying backend on $ip ---"
-
-    run_remote "$ip" \
+    log "--- Redeploying backend on ${BACKEND_SERVER_IP} ---"
+    run_remote \
         "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin"
-
-    run_remote "$ip" bash <<REMOTE
+    run_remote bash <<'REMOTE'
 set -euo pipefail
 cd /etc/vacancy-mirror
 docker compose pull backend
 docker compose up -d --no-deps backend
+echo "Backend container restarted."
+docker logs vacancy-mirror-backend-1 --tail 20 2>&1 || true
 REMOTE
-
     log "Backend redeployed."
 }
 
 # ---------------------------------------------------------------------------
-# Redeploy scraper (just pull image — cron will use it on next run)
+# Update scraper image (cron will pick it up on next run)
 # ---------------------------------------------------------------------------
 deploy_scraper() {
-    local ip
-    ip=$(server_ip "$SCRAPER_SERVER")
-    log "--- Updating scraper image on $ip ---"
-
-    run_remote "$ip" \
+    log "--- Updating scraper image on ${BACKEND_SERVER_IP} ---"
+    run_remote \
         "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin"
-
-    run_remote "$ip" "docker pull '${SCRAPER_IMAGE}'"
+    run_remote "docker pull '${SCRAPER_IMAGE}'"
     log "Scraper image updated. Next cron run will use the new image."
 }
 
-main() {
-    log "=== Deploying to Hetzner ==="
-    deploy_backend
-    deploy_scraper
-    log "=== Deploy complete ==="
-}
-
-main "$@"
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+log "=== Deploying: $TARGET ==="
+case "$TARGET" in
+    backend) deploy_backend ;;
+    scraper) deploy_scraper ;;
+    all)
+        deploy_backend
+        deploy_scraper
+        ;;
+esac
+log "=== Deploy complete ==="

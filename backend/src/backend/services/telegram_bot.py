@@ -102,11 +102,11 @@ def _start_keyboard() -> InlineKeyboardMarkup:
         )],
         [InlineKeyboardButton(
             "✨ What can this bot do?         ",
-            callback_data=CB_BENEFITS,
+            url="https://www.vacancy-mirror.com/benefits",
         )],
         [InlineKeyboardButton(
             "💳 Pricing & subscription plans",
-            callback_data=CB_PRICING,
+            url="https://www.vacancy-mirror.com/pricing",
         )],
         [InlineKeyboardButton(
             "🆘 Contact support                    ",
@@ -114,7 +114,7 @@ def _start_keyboard() -> InlineKeyboardMarkup:
         )],
         [InlineKeyboardButton(
             "🔒 Privacy policy & terms        ",
-            callback_data=CB_PRIVACY,
+            url="https://www.vacancy-mirror.com/privacy",
         )],
     ])
 

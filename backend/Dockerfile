@@ -9,6 +9,11 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY src/ src/
 
+# Install CPU-only PyTorch first to avoid pulling the 2 GB CUDA stack.
+# sentence-transformers will reuse this torch installation.
+RUN pip install --no-cache-dir \
+    torch --index-url https://download.pytorch.org/whl/cpu
+
 RUN pip install --no-cache-dir -e .
 
 ENV LOG_LEVEL=INFO
