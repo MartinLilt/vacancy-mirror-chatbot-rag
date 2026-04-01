@@ -372,6 +372,8 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
     status = "failed"
     jobs: list[dict] = []
     pages_scraped = 0
+    total_inserted = 0
+    total_skipped = 0
 
     # Track start time for runtime limit
     scrape_start_time = datetime.now()
@@ -440,6 +442,8 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
                     category_uid=args.uid,
                     category_name=category_name,
                 )
+                total_inserted += inserted
+                total_skipped += len(page_jobs) - inserted
                 log.info(f"Inserted {inserted} jobs from page {page}")
 
             # Delay before next page (except on last page)
@@ -461,6 +465,8 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
             run_id=run_id,
             pages_collected=pages_scraped,
             jobs_collected=len(jobs),
+            jobs_inserted=total_inserted,
+            jobs_skipped=total_skipped,
             status=status,
         )
         db.close()
@@ -470,9 +476,6 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
         len(jobs),
         pages_scraped,
     )
-
-    # ── Print raw job list for inspection ─────────────────────────
-    _print_jobs(jobs, category_name=category_name)
 
 
 def _print_jobs(

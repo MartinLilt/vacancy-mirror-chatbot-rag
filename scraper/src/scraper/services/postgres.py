@@ -190,6 +190,8 @@ class ScraperPostgresService:
         run_id: int,
         pages_collected: int,
         jobs_collected: int,
+        jobs_inserted: int = 0,
+        jobs_skipped: int = 0,
         status: str = "done",
         error_message: str | None = None,
     ) -> None:
@@ -198,7 +200,9 @@ class ScraperPostgresService:
         Args:
             run_id: The scrape_run id to update.
             pages_collected: Number of pages fetched.
-            jobs_collected: Number of job rows inserted.
+            jobs_collected: Total jobs seen (before dedup).
+            jobs_inserted: New rows actually written to DB.
+            jobs_skipped: Duplicate rows skipped (ON CONFLICT).
             status: Final status string (``"done"`` or ``"failed"``).
             error_message: Optional error detail for failed runs.
         """
@@ -210,6 +214,11 @@ class ScraperPostgresService:
                     finished_at      = NOW(),
                     pages_collected  = %s,
                     jobs_collected   = %s,
+                    jobs_inserted    = %s,
+                    jobs_skipped     = %s,
+                    duration_seconds = EXTRACT(
+                        EPOCH FROM (NOW() - started_at)
+                    )::INT,
                     error_message    = %s
                 WHERE id = %s
                 """,
@@ -217,6 +226,8 @@ class ScraperPostgresService:
                     status,
                     pages_collected,
                     jobs_collected,
+                    jobs_inserted,
+                    jobs_skipped,
                     error_message,
                     run_id,
                 ),
@@ -224,11 +235,13 @@ class ScraperPostgresService:
         self.conn.commit()
         log.info(
             "Scrape run %d finished: status=%s, "
-            "pages=%d, jobs=%d.",
+            "pages=%d, jobs=%d (inserted=%d, skipped=%d).",
             run_id,
             status,
             pages_collected,
             jobs_collected,
+            jobs_inserted,
+            jobs_skipped,
         )
 
     # ------------------------------------------------------------------

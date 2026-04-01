@@ -1,4 +1,9 @@
 version: "3.9"
+# =============================================================================
+# Server 2 (178.104.110.28) — Scraper stack
+# Services: postgres (local), flaresolverr, scraper (cron + scraper-api:8000),
+#           grafana, prometheus, node-exporter
+# =============================================================================
 
 services:
   postgres:
@@ -10,7 +15,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./infra/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - /etc/vacancy-mirror/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -18,20 +23,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  backend:
-    image: ghcr.io/martinlilt/vacancy-mirror-backend:latest
-    container_name: backend
-    restart: unless-stopped
-    environment:
-      DB_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: python -m backend.cli telegram-bot
 
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
@@ -48,26 +39,24 @@ services:
   scraper:
     image: ghcr.io/martinlilt/vacancy-mirror-scraper:latest
     container_name: scraper
-    restart: "no"
+    restart: unless-stopped
     environment:
-      # Database connection - use DATABASE_URL from .env for external server
-      DATABASE_URL: ${DATABASE_URL}
-
-      # Residential proxy (Webshare rotating)
+      # Local postgres (on this same server)
+      DATABASE_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
+      # Scraper API auth key (for POST /scrape and POST /jobs/clear)
+      SCRAPER_API_KEY: ${SCRAPER_API_KEY}
+      # Residential proxy
       PROXY_URL: ${PROXY_URL:-}
-
       # Chrome session persistence
       CHROME_USER_DATA_DIR: /app/data/chrome_profile
       COOKIE_BACKUP_PATH: /app/data/session_cookies.json
-
-      # Category UID (for single-category runs)
-      CATEGORY_UID: ${CATEGORY_UID:-}
-
-      # FlareSolverr API endpoint
+      # FlareSolverr
       FLARESOLVERR_URL: http://flaresolverr:8191/v1
+    ports:
+      # scraper-api (FastAPI) on port 8000
+      - "8000:8000"
     volumes:
-      # Persist Chrome session + cookies + checkpoints across restarts
-      - ./data:/app/data
+      - scraper-data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,7 +68,7 @@ services:
     container_name: prometheus
     restart: unless-stopped
     volumes:
-      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /etc/vacancy-mirror/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"
@@ -111,7 +100,7 @@ services:
       GF_SERVER_ROOT_URL: "http://178.104.110.28:3000"
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - /etc/vacancy-mirror/grafana/provisioning:/etc/grafana/provisioning:ro
     ports:
       - "3000:3000"
     depends_on:
@@ -120,5 +109,6 @@ services:
 
 volumes:
   postgres-data:
+  scraper-data:
   prometheus-data:
   grafana-data:

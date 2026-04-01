@@ -1,0 +1,56 @@
+version: "3.9"
+# =============================================================================
+# Server 1 (178.104.113.58) — Backend stack
+# Services: postgres (pgvector), backend (Telegram bot + RAG + embeddings)
+# =============================================================================
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vacancy_mirror
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - /etc/vacancy-mirror/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d vacancy_mirror"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    image: ghcr.io/martinlilt/vacancy-mirror-backend:latest
+    container_name: backend
+    restart: unless-stopped
+    environment:
+      DB_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      SUPPORT_ADMIN_ID: ${SUPPORT_ADMIN_ID:-}
+      ALLOWED_USER_IDS: ${ALLOWED_USER_IDS:-}
+      STRIPE_PLUS_URL: ${STRIPE_PLUS_URL:-}
+      STRIPE_PRO_PLUS_URL: ${STRIPE_PRO_PLUS_URL:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      WEBHOOK_PORT: ${WEBHOOK_PORT:-8080}
+      WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL:-}
+      GOOGLE_SHEETS_ID: ${GOOGLE_SHEETS_ID:-}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${GOOGLE_SERVICE_ACCOUNT_JSON:-}
+      # Scraper API endpoint (on Server 2)
+      SCRAPER_API_URL: ${SCRAPER_API_URL:-}
+      SCRAPER_API_KEY: ${SCRAPER_API_KEY:-}
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m backend.cli telegram-bot
+
+volumes:
+  postgres-data:

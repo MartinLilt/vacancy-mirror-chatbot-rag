@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
     finished_at TIMESTAMPTZ,
     pages_collected INT NOT NULL DEFAULT 0,
     jobs_collected INT NOT NULL DEFAULT 0,
+    jobs_inserted INT NOT NULL DEFAULT 0, -- new rows actually written
+    jobs_skipped INT NOT NULL DEFAULT 0, -- duplicates skipped
+    duration_seconds INT, -- computed on finish
     status TEXT NOT NULL DEFAULT 'running', -- running | done | failed
     error_message TEXT
 );

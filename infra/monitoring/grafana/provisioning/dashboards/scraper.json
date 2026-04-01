@@ -1,0 +1,229 @@
+{
+  "title": "Vacancy Mirror — Scraper Dashboard",
+  "uid": "scraper-dashboard",
+  "tags": ["scraper", "vacancy-mirror"],
+  "timezone": "browser",
+  "refresh": "1m",
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Last Run Status",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+          "rawSql": "SELECT status FROM scrape_runs ORDER BY started_at DESC LIMIT 1",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "done": { "text": "✅ done", "color": "green" }, "running": { "text": "🔄 running", "color": "blue" }, "failed": { "text": "❌ failed", "color": "red" } } }
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Last Run Time",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+          "rawSql": "SELECT EXTRACT(EPOCH FROM started_at)*1000 AS time FROM scrape_runs ORDER BY started_at DESC LIMIT 1",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": { "colorMode": "none", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "unit": "dateTimeAsLocal" } }
+    },
+    {
+      "id": 3,
+      "title": "Jobs Inserted (last run)",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+          "rawSql": "SELECT jobs_inserted FROM scrape_runs ORDER BY started_at DESC LIMIT 1",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": { "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "green" } } }
+    },
+    {
+      "id": 4,
+      "title": "Duration (last run)",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+          "rawSql": "SELECT duration_seconds FROM scrape_runs ORDER BY started_at DESC LIMIT 1",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": { "colorMode": "none", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 5,
+      "title": "Jobs Inserted per Run (last 24h)",
+      "type": "barchart",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+          "rawSql": "SELECT id::text AS run, jobs_inserted FROM scrape_runs WHERE started_at > NOW() - INTERVAL '24 hours' ORDER BY started_at",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "fixed", "fixedColor": "green" } }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Jobs Skipped (duplicates) per Run (last 24h)",
+      "type": "barchart",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+          "rawSql": "SELECT id::text AS run, jobs_skipped FROM scrape_runs WHERE started_at > NOW() - INTERVAL '24 hours' ORDER BY started_at",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "fixed", "fixedColor": "orange" } }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Run History (last 50 runs)",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 10 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+          "rawSql": "SELECT id, category_name, started_at, finished_at, pages_collected, jobs_collected, jobs_inserted, jobs_skipped, duration_seconds, status, error_message FROM scrape_runs ORDER BY started_at DESC LIMIT 50",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": { "sortBy": [{ "displayName": "started_at", "desc": true }] },
+      "fieldConfig": {
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "status" }, "properties": [{ "id": "mappings", "value": [{ "type": "value", "options": { "done": { "text": "✅ done", "color": "green", "index": 0 }, "running": { "text": "🔄 running", "color": "blue", "index": 1 }, "failed": { "text": "❌ failed", "color": "red", "index": 2 } } }] }] },
+          { "matcher": { "id": "byName", "options": "duration_seconds" }, "properties": [{ "id": "unit", "value": "s" }] }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "title": "Server CPU Usage %",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+          "expr": "100 - (avg(irate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+          "legendFormat": "CPU %",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "fixed", "fixedColor": "blue" } } }
+    },
+    {
+      "id": 9,
+      "title": "Server RAM Usage %",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+          "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+          "legendFormat": "RAM %",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "fixed", "fixedColor": "purple" } } }
+    },
+    {
+      "id": 10,
+      "title": "Total Jobs in DB",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 30, "w": 8, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+          "rawSql": "SELECT COUNT(*) AS total FROM raw_jobs",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": { "colorMode": "none", "graphMode": "none" }
+    },
+    {
+      "id": 11,
+      "title": "Failed Runs (last 7 days)",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 30, "w": 8, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+          "rawSql": "SELECT COUNT(*) FROM scrape_runs WHERE status = 'failed' AND started_at > NOW() - INTERVAL '7 days'",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": { "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 1, "color": "red" }] }, "color": { "mode": "thresholds" } } }
+    },
+    {
+      "id": 12,
+      "title": "Total Runs Today",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 30, "w": 8, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PCC52D03280B7034C" },
+          "rawSql": "SELECT COUNT(*) FROM scrape_runs WHERE started_at::date = CURRENT_DATE",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": { "colorMode": "none", "graphMode": "none" }
+    }
+  ],
+  "schemaVersion": 36,
+  "version": 2
+}

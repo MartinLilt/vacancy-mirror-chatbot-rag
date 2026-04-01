@@ -1,14 +1,13 @@
 FROM python:3.13-slim
 
-# Install Chromium + cron + jq + runtime dependencies in one layer.
-# Chromium works on both amd64 and arm64 (Apple Silicon via Docker Desktop).
-# Headless mode is sufficient with FlareSolverr handling Cloudflare.
+# Install Chromium + cron + supervisor + runtime deps in one layer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-driver \
     cron \
     curl \
     jq \
+    supervisor \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -46,6 +45,7 @@ COPY src/ src/
 COPY scripts/ scripts/
 COPY crontab /etc/cron.d/scraper-cron
 COPY entrypoint.sh /app/entrypoint.sh
+COPY supervisord.conf /etc/supervisor/conf.d/scraper.conf
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -e .
@@ -63,4 +63,5 @@ ENV CHROME_PATH=/usr/bin/chromium
 ENV LOG_LEVEL=INFO
 ENV PYTHONUNBUFFERED=1
 
-CMD ["/app/entrypoint.sh"]
+# supervisord manages: cron + scraper-api (uvicorn)
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/scraper.conf"]
