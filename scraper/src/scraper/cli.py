@@ -157,6 +157,86 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
 
+    # ── scrape-chaos ─────────────────────────────────────────────────
+    chaos_p = sub.add_parser(
+        "scrape-chaos",
+        help=(
+            "Chaotic multi-category scraper: visits all 12 categories in "
+            "random order, random pages, remembers progress, stops at time limit."
+        ),
+    )
+    chaos_p.add_argument(
+        "--max-pages-per-cat",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Max pages to collect per category per session (default: 5).",
+    )
+    chaos_p.add_argument(
+        "--target-per-cat",
+        type=int,
+        default=100,
+        metavar="N",
+        help="Target number of jobs per category (default: 100). Stops collecting once reached.",
+    )
+    chaos_p.add_argument(
+        "--delay-min",
+        type=int,
+        default=15,
+        metavar="SEC",
+        help="Minimum delay between pages in seconds (default: 15).",
+    )
+    chaos_p.add_argument(
+        "--delay-max",
+        type=int,
+        default=90,
+        metavar="SEC",
+        help="Maximum delay between pages in seconds (default: 90).",
+    )
+    chaos_p.add_argument(
+        "--stop-at-hour",
+        type=int,
+        default=22,
+        metavar="HOUR",
+        help="Stop scraping at hour N (24h format, default: 22).",
+    )
+    chaos_p.add_argument(
+        "--max-runtime-minutes",
+        type=int,
+        default=50,
+        metavar="MIN",
+        help="Maximum runtime in minutes (default: 50).",
+    )
+    chaos_p.add_argument(
+        "--state-file",
+        default="/app/data/chaos_state.json",
+        metavar="PATH",
+        help="Path to JSON state file tracking per-category progress.",
+    )
+    chaos_p.add_argument(
+        "--reset",
+        action="store_true",
+        help="Reset all state and start fresh (ignores saved progress).",
+    )
+    chaos_p.add_argument(
+        "--db-url",
+        default=None,
+        metavar="URL",
+        help="PostgreSQL connection URL. Falls back to DATABASE_URL env var.",
+    )
+    chaos_p.add_argument(
+        "--user-data-dir",
+        default=None,
+        metavar="PATH",
+        help="Chrome User Data Directory for session persistence.",
+    )
+    chaos_p.add_argument(
+        "--proxy-url",
+        default=None,
+        metavar="URL",
+        help="Residential proxy URL. Falls back to PROXY_URL env var.",
+    )
+
     # ── warmup ───────────────────────────────────────────────────────
     warmup_p = sub.add_parser(
         "warmup",
@@ -619,6 +699,355 @@ async def _cmd_inspect_category(args: argparse.Namespace) -> None:
         sys.exit(2)
 
 
+async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
+    """Chaotic multi-category scraper.
+
+    Strategy:
+    - Loads/saves state from JSON file (per-category pages visited + jobs count)
+    - Each session: shuffles categories by priority (least collected first),
+      picks random pages (not sequential), scrapes until time limit
+    - Respects per-category target (stops visiting a category once target reached)
+    - Respects real page limit from Upwork (never exceeds available pages)
+    - Inserts all collected jobs to PostgreSQL immediately
+    """
+    import json
+    import os
+    import random
+    from datetime import datetime
+    from pathlib import Path
+
+    # ── Config ────────────────────────────────────────────────────────
+    db_url: str | None = args.db_url or os.environ.get("DATABASE_URL")
+    proxy_url: str | None = args.proxy_url or os.environ.get("PROXY_URL")
+    user_data_dir = Path(args.user_data_dir) if args.user_data_dir else None
+    state_path = Path(args.state_file)
+    max_runtime_sec = args.max_runtime_minutes * 60
+    start_time = datetime.now()
+
+    # All 12 categories: name → uid
+    all_cats = list(CATEGORY_UIDS.items())  # [(name, uid), ...]
+
+    # ── State: { uid: { "collected": int, "visited_pages": [int, ...] } } ──
+    def load_state() -> dict:
+        if state_path.exists() and not args.reset:
+            try:
+                with open(state_path) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        # Fresh state
+        return {
+            uid: {"collected": 0, "visited_pages": []}
+            for _, uid in all_cats
+        }
+
+    def save_state(state: dict) -> None:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = state_path.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump(state, f, indent=2)
+        tmp.replace(state_path)  # atomic rename — safe against kill mid-write
+
+    def elapsed_seconds() -> float:
+        return (datetime.now() - start_time).total_seconds()
+
+    def time_ok() -> bool:
+        if elapsed_seconds() >= max_runtime_sec:
+            return False
+        if datetime.now().hour >= args.stop_at_hour:
+            return False
+        return True
+
+    # ── Load state ────────────────────────────────────────────────────
+    state = load_state()
+    if args.reset:
+        log.info("🔄 State reset requested — starting fresh")
+    log.info(
+        "📊 Chaos state loaded: %d categories tracked",
+        len(state),
+    )
+    for name, uid in all_cats:
+        s = state.get(uid, {"collected": 0, "visited_pages": []})
+        log.info(
+            "   %-38s collected=%d  visited_pages=%s",
+            name,
+            s["collected"],
+            s["visited_pages"][:10],
+        )
+
+    # ── DB setup ──────────────────────────────────────────────────────
+    db: ScraperPostgresService | None = None
+    if db_url:
+        try:
+            db = ScraperPostgresService(db_url)
+            log.info("✅ DB connected")
+        except Exception as exc:
+            log.error("DB connection failed: %s — continuing without DB", exc)
+            db = None
+    else:
+        log.warning("DATABASE_URL not set — results will NOT be saved to DB")
+
+    # ── Browser ───────────────────────────────────────────────────────
+    service = UpworkScraperService(
+        page_delay_min=float(args.delay_min),
+        page_delay_max=float(args.delay_max),
+        user_data_dir=user_data_dir,
+        proxy_url=proxy_url,
+    )
+    await service.start_browser()
+
+    total_inserted_session = 0
+    total_pages_session = 0
+    session_run_ids: dict[str, int] = {}
+
+    try:
+        # ── Main chaos loop ───────────────────────────────────────────
+        while time_ok():
+            # Filter categories that haven't reached target
+            active_cats = [
+                (name, uid)
+                for name, uid in all_cats
+                if state.get(uid, {}).get("collected", 0) < args.target_per_cat
+            ]
+
+            if not active_cats:
+                log.info(
+                    "🎯 All categories reached target of %d jobs — done!",
+                    args.target_per_cat,
+                )
+                break
+
+            # Sort by least collected (priority), then shuffle within priority groups
+            # This gives bias toward under-collected cats but still chaotic order
+            active_cats.sort(
+                key=lambda x: state.get(x[1], {}).get("collected", 0)
+            )
+            # Take bottom half (least collected) and shuffle them for chaos
+            cutoff = max(1, len(active_cats) // 2 + 1)
+            priority_pool = active_cats[:cutoff]
+            rest_pool = active_cats[cutoff:]
+            random.shuffle(priority_pool)
+            random.shuffle(rest_pool)
+            # Visit priority first, then rest — but still random within each group
+            visit_order = priority_pool + rest_pool
+
+            session_made_progress = False
+
+            for cat_name, cat_uid in visit_order:
+                if not time_ok():
+                    break
+
+                cat_state = state.setdefault(
+                    cat_uid, {"collected": 0, "visited_pages": []}
+                )
+
+                if cat_state["collected"] >= args.target_per_cat:
+                    continue
+
+                # ── Pick a random page we haven't visited yet ─────────
+                visited = set(cat_state["visited_pages"])
+                # Upwork caps at 100 pages, but we also respect real limit
+                # We try pages 1–100, avoiding already visited ones
+                # Pick from first 20 pages preferring unexplored territory
+                # (Upwork typically has fewer pages for smaller categories)
+                max_possible = 100  # hard Upwork cap
+                all_possible = [
+                    p for p in range(1, max_possible + 1)
+                    if p not in visited
+                ]
+                if not all_possible:
+                    log.info(
+                        "  [%s] All %d pages visited — skipping",
+                        cat_name, max_possible,
+                    )
+                    continue
+
+                # Weighted choice: pages 1–15 get 3× weight (most jobs there)
+                # Pages 16–50 get 1× weight, pages 51+ get 0.3× weight
+                weights = []
+                for p in all_possible:
+                    if p <= 15:
+                        weights.append(3.0)
+                    elif p <= 50:
+                        weights.append(1.0)
+                    else:
+                        weights.append(0.3)
+
+                # Pick N random pages for this category this iteration
+                n_pages = min(args.max_pages_per_cat, len(all_possible))
+                chosen_pages = random.choices(
+                    all_possible, weights=weights, k=n_pages * 3
+                )
+                # Deduplicate while preserving order
+                seen: set[int] = set()
+                unique_pages: list[int] = []
+                for p in chosen_pages:
+                    if p not in seen:
+                        seen.add(p)
+                        unique_pages.append(p)
+                    if len(unique_pages) >= n_pages:
+                        break
+
+                log.info(
+                    "🎲 [%s] collected=%d/%d  pages to visit: %s",
+                    cat_name,
+                    cat_state["collected"],
+                    args.target_per_cat,
+                    unique_pages,
+                )
+
+                # Ensure DB run record
+                run_id: int | None = session_run_ids.get(cat_uid)
+                if run_id is None and db is not None:
+                    try:
+                        run_id = db.start_scrape_run(
+                            category_uid=cat_uid,
+                            category_name=cat_name,
+                        )
+                        session_run_ids[cat_uid] = run_id
+                    except Exception as exc:
+                        log.error("DB start_scrape_run failed: %s", exc)
+                        run_id = None
+
+                # ── Scrape chosen pages ───────────────────────────────
+                for page_num in unique_pages:
+                    if not time_ok():
+                        break
+
+                    if cat_state["collected"] >= args.target_per_cat:
+                        break
+
+                    log.info(
+                        "   📄 [%s] page %d ...", cat_name, page_num
+                    )
+
+                    try:
+                        page_jobs = await service.scrape_page(
+                            category_uid=cat_uid,
+                            page=page_num,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "   ⚠️  [%s] page %d failed: %s",
+                            cat_name, page_num, exc,
+                        )
+                        cat_state["visited_pages"].append(page_num)
+                        save_state(state)
+                        continue
+
+                    # Mark page as visited regardless of result
+                    cat_state["visited_pages"].append(page_num)
+
+                    if not page_jobs:
+                        log.info(
+                            "   ⚪ [%s] page %d empty — "
+                            "Upwork limit reached for this category",
+                            cat_name, page_num,
+                        )
+                        # Mark all pages >= page_num as visited to avoid retrying
+                        for future_p in range(page_num, max_possible + 1):
+                            if future_p not in set(cat_state["visited_pages"]):
+                                cat_state["visited_pages"].append(future_p)
+                        save_state(state)
+                        break
+
+                    # Insert to DB
+                    inserted = 0
+                    if db is not None and run_id is not None:
+                        try:
+                            inserted = db.insert_raw_jobs(
+                                jobs=page_jobs,
+                                scrape_run_id=run_id,
+                                category_uid=cat_uid,
+                                category_name=cat_name,
+                            )
+                        except Exception as exc:
+                            log.error(
+                                "DB insert_raw_jobs failed: %s", exc
+                            )
+
+                    cat_state["collected"] += inserted
+                    total_inserted_session += inserted
+                    total_pages_session += 1
+                    session_made_progress = True
+
+                    log.info(
+                        "   ✅ [%s] page %d: +%d jobs  "
+                        "(total collected=%d/%d)",
+                        cat_name, page_num, inserted,
+                        cat_state["collected"], args.target_per_cat,
+                    )
+
+                    save_state(state)
+
+                    # Random delay between pages
+                    if time_ok():
+                        delay = random.randint(
+                            args.delay_min, args.delay_max
+                        )
+                        log.info(
+                            "   ⏳ Waiting %ds before next page...", delay
+                        )
+                        await __import__("asyncio").sleep(delay)
+
+            if not session_made_progress:
+                log.info(
+                    "No progress made in this iteration — "
+                    "all categories either complete or at Upwork limit"
+                )
+                break
+
+        # ── Finish DB run records ─────────────────────────────────────
+        if db is not None:
+            for cat_uid, run_id in session_run_ids.items():
+                cat_state = state.get(cat_uid, {})
+                try:
+                    db.finish_scrape_run(
+                        run_id=run_id,
+                        pages_collected=len(
+                            cat_state.get("visited_pages", [])),
+                        jobs_collected=cat_state.get("collected", 0),
+                        jobs_inserted=cat_state.get("collected", 0),
+                        jobs_skipped=0,
+                        status="done",
+                    )
+                except Exception as exc:
+                    log.error(
+                        "DB finish_scrape_run failed for %s: %s",
+                        cat_uid, exc,
+                    )
+
+    except Exception as exc:
+        log.error("Chaos scraper error: %s", exc, exc_info=True)
+
+    finally:
+        await service.stop_browser()
+        if db is not None:
+            db.close()
+
+    # ── Final summary ─────────────────────────────────────────────────
+    log.info("═" * 60)
+    log.info(
+        "🏁 Chaos session complete — %ds elapsed",
+        int(elapsed_seconds()),
+    )
+    log.info(
+        "   Pages scraped  : %d", total_pages_session
+    )
+    log.info(
+        "   Jobs inserted  : %d", total_inserted_session
+    )
+    log.info("   Category progress:")
+    for name, uid in all_cats:
+        s = state.get(uid, {"collected": 0})
+        done = "✅" if s["collected"] >= args.target_per_cat else "⏳"
+        log.info(
+            "   %s %-38s %d/%d",
+            done, name, s["collected"], args.target_per_cat,
+        )
+    log.info("═" * 60)
+
+
 async def _cmd_warmup(args: argparse.Namespace) -> None:
     """Warm up browser session by visiting public pages."""
     import os
@@ -729,6 +1158,8 @@ def main() -> None:
         asyncio.run(_cmd_scrape_categories())
     elif args.command == "scrape":
         asyncio.run(_cmd_scrape(args))
+    elif args.command == "scrape-chaos":
+        asyncio.run(_cmd_scrape_chaos(args))
     elif args.command == "inspect-category":
         asyncio.run(_cmd_inspect_category(args))
     elif args.command == "warmup":

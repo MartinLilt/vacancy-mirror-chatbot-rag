@@ -54,7 +54,8 @@ RUN pip install --no-cache-dir -e .
 RUN chmod 0644 /etc/cron.d/scraper-cron && \
     crontab /etc/cron.d/scraper-cron && \
     chmod +x /app/entrypoint.sh && \
-    chmod +x /app/scripts/scraper_runner.sh
+    chmod +x /app/scripts/scraper_runner.sh && \
+    chmod +x /app/scripts/chaos_runner.sh
 
 # Create state directory (will be mounted as volume)
 RUN mkdir -p /app/data

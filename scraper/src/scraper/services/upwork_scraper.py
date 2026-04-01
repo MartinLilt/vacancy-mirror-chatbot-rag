@@ -77,6 +77,21 @@ _CF_INDICATORS: tuple[str, ...] = (
     "Enable JavaScript and cookies to continue",
 )
 
+# Strings that indicate Upwork soft-ban / CAPTCHA / access denied
+_BAN_INDICATORS: tuple[str, ...] = (
+    "Access denied",
+    "403 Forbidden",
+    "Your access to this page has been blocked",
+    "unusual traffic",
+    "captcha",
+    "CAPTCHA",
+    "recaptcha",
+    "are you a robot",
+    "Are you a robot",
+    "Sorry, you have been blocked",
+    "Please verify you are a human",
+)
+
 
 def _build_url(
     category_uid: str,
@@ -127,8 +142,11 @@ def _extract_paging(nuxt: dict[str, Any]) -> dict[str, int]:
 
 
 def _is_cloudflare_block(html: str) -> bool:
-    """Return True if the page HTML looks like a Cloudflare challenge."""
-    return any(indicator in html for indicator in _CF_INDICATORS)
+    """Return True if the page looks like a Cloudflare challenge or ban."""
+    return (
+        any(indicator in html for indicator in _CF_INDICATORS)
+        or any(indicator in html for indicator in _BAN_INDICATORS)
+    )
 
 
 class ScraperError(Exception):
@@ -619,6 +637,9 @@ class UpworkScraperService:
                 page_num, attempt, self.max_retries, url,
             )
 
+            # Exponential backoff: 10s → 30s → 90s
+            backoff = self.retry_delay * (3 ** (attempt - 1))
+
             # Get HTML from FlareSolverr (bypasses Cloudflare)
             try:
                 solution = await self._solve_cloudflare_with_flaresolverr(
@@ -633,8 +654,17 @@ class UpworkScraperService:
                         page_num, attempt, self.max_retries,
                     )
                     if attempt < self.max_retries:
-                        await asyncio.sleep(self.retry_delay)
+                        await asyncio.sleep(backoff)
                     continue
+
+                # Fix 3: Detect Cloudflare / ban page before processing
+                if _is_cloudflare_block(html):
+                    log.error(
+                        "🚫 Ban/Cloudflare page detected on page %d "
+                        "(attempt %d/%d) — stopping category scrape.",
+                        page_num, attempt, self.max_retries,
+                    )
+                    return None  # hard stop — do not retry
 
                 # Load HTML into nodriver page to execute JavaScript
                 await self.page.evaluate(
@@ -655,7 +685,7 @@ class UpworkScraperService:
                         page_num, attempt, self.max_retries,
                     )
                     if attempt < self.max_retries:
-                        await asyncio.sleep(self.retry_delay)
+                        await asyncio.sleep(backoff)
                     continue
 
                 jobs = _extract_jobs(nuxt)
@@ -665,7 +695,7 @@ class UpworkScraperService:
                         "retrying.",
                         page_num, attempt, self.max_retries,
                     )
-                    await asyncio.sleep(self.retry_delay)
+                    await asyncio.sleep(backoff)
                     continue
 
                 # Random delay between pages
@@ -681,7 +711,7 @@ class UpworkScraperService:
                     page_num, attempt, self.max_retries, e,
                 )
                 if attempt < self.max_retries:
-                    await asyncio.sleep(self.retry_delay)
+                    await asyncio.sleep(backoff)
                 continue
 
         log.error(

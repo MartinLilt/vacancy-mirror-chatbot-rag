@@ -22,11 +22,18 @@ START_HOUR=8
 END_HOUR=22
 
 # Delay between pages (seconds)
-DELAY_MIN=30
-DELAY_MAX=45
+# Wide range looks more human: short reads + occasional long pauses
+DELAY_MIN=15
+DELAY_MAX=90
 
 # For level 1 testing: 4 pages × 50 jobs = 200 jobs (2 lists × 100)
 MAX_PAGES_TEST=4
+
+# Persistent Chrome User Data Directory — keeps cookies/session across runs.
+# This is the single most important anti-detection measure: CF sees a
+# "returning browser" with history instead of a fresh one every hour.
+USER_DATA_DIR="/app/data/chrome_profile"
+mkdir -p "$USER_DATA_DIR"
 
 # Lock file to prevent overlapping processes
 LOCK_FILE="/app/data/scraper.lock"
@@ -153,6 +160,7 @@ echo "   Max pages: $MAX_PAGES_TEST (level 1 test)"
 echo "   Delay: ${DELAY_MIN}-${DELAY_MAX} sec"
 echo "   Stop at: ${END_HOUR}:00"
 echo "   Runtime limit: ${RUNTIME_MINUTES} minutes"
+echo "   Chrome profile: $USER_DATA_DIR"
 echo ""
 
 python -m scraper.cli scrape \
@@ -164,6 +172,7 @@ python -m scraper.cli scrape \
     --delay-max "$DELAY_MAX" \
     --stop-at-hour "$END_HOUR" \
     --max-runtime-minutes "$RUNTIME_MINUTES" \
+    --user-data-dir "$USER_DATA_DIR" \
     --db-url "$DATABASE_URL"
 
 EXIT_CODE=$?

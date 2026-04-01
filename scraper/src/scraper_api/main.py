@@ -8,19 +8,24 @@ GET  /categories               — list of all categories from DB
 POST /scrape                   — trigger a scrape run
 GET  /jobs                     — paginated raw jobs from DB
 POST /jobs/clear               — truncate raw_jobs (weekly reset)
+GET  /chaos-state              — per-category chaos scraper progress
 
 Auth
 ----
 All mutating endpoints require the X-API-Key header matching API_KEY env var.
-GET endpoints (/health, /status, /categories, /jobs) are public.
+GET endpoints (/health, /status, /categories, /jobs, /chaos-state) are public.
 """
 
 from __future__ import annotations
 
+import collections
+import json
 import logging
 import os
+import signal
 import subprocess
 import threading
+from pathlib import Path
 from typing import Any
 
 import psycopg2
@@ -67,6 +72,9 @@ _scraper_state: dict[str, Any] = {
     "max_pages": None,
 }
 
+# Ring buffer — last 200 log lines from scraper subprocess
+_log_buffer: collections.deque = collections.deque(maxlen=200)
+
 
 # ---------------------------------------------------------------------------
 # Auth dependency
@@ -111,8 +119,16 @@ class ClearResponse(BaseModel):
 # Background scraper runner
 # ---------------------------------------------------------------------------
 
+def _push_log(msg: str) -> None:
+    """Append a line to the log buffer and logger."""
+    _log_buffer.append(msg)
+    log.info("[scraper] %s", msg)
+
+
 def _run_scraper(req: ScrapeRequest) -> None:
     """Launch scraper in subprocess and track state."""
+    from datetime import datetime, timezone
+
     cmd = [
         "python", "-m", "scraper.cli", "scrape",
         "--uid", req.category_uid,
@@ -122,7 +138,16 @@ def _run_scraper(req: ScrapeRequest) -> None:
         "--stop-at-hour", str(req.stop_at_hour),
     ]
 
-    log.info("Starting scraper: %s", " ".join(cmd))
+    uid_to_name = {v: k for k, v in CATEGORY_UIDS.items()}
+    cat_name = uid_to_name.get(req.category_uid, req.category_uid)
+
+    _push_log(f"{'='*60}")
+    _push_log(
+        f"▶ SCRAPE STARTED  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    _push_log(f"  Category : {cat_name}")
+    _push_log(f"  Max pages: {req.max_pages}  (~{req.max_pages * 50} jobs)")
+    _push_log(f"  Delay    : {req.delay_min}–{req.delay_max}s between pages")
+    _push_log(f"{'='*60}")
 
     try:
         proc = subprocess.Popen(
@@ -136,14 +161,28 @@ def _run_scraper(req: ScrapeRequest) -> None:
         with _scraper_lock:
             _scraper_state["pid"] = proc.pid
 
-        # Stream logs without buffering
+        _push_log(f"  PID {proc.pid} — subprocess launched")
+
+        # Stream logs into ring buffer + logger
         for line in proc.stdout:
-            log.info("[scraper] %s", line.rstrip())
+            stripped = line.rstrip()
+            if stripped:
+                _push_log(stripped)
 
         proc.wait()
-        log.info("Scraper process finished (rc=%d)", proc.returncode)
+        rc = proc.returncode
+        _push_log(f"{'='*60}")
+        if rc == 0:
+            _push_log(
+                f"✅ SCRAPE FINISHED  rc={rc}  {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
+        else:
+            _push_log(
+                f"❌ SCRAPE FAILED    rc={rc}  {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
+        _push_log(f"{'='*60}")
+        log.info("Scraper process finished (rc=%d)", rc)
 
     except Exception as exc:
+        _push_log(f"❌ SUBPROCESS ERROR: {exc}")
         log.error("Scraper subprocess error: %s", exc)
     finally:
         with _scraper_lock:
@@ -225,10 +264,46 @@ def trigger_scrape(req: ScrapeRequest) -> ScrapeResponse:
         _scraper_state["max_pages"] = req.max_pages
         _scraper_state["started_at"] = datetime.now(timezone.utc).isoformat()
 
+    _log_buffer.clear()
     thread = threading.Thread(target=_run_scraper, args=(req,), daemon=True)
     thread.start()
 
     return ScrapeResponse(ok=True, message="Scrape started in background.")
+
+
+@app.post("/stop", dependencies=[Depends(require_api_key)])
+def stop_scraper() -> dict:
+    """Send SIGTERM to the running scraper process."""
+    with _scraper_lock:
+        if _scraper_state["status"] != "running":
+            raise HTTPException(
+                status_code=409, detail="Scraper is not running.")
+        pid = _scraper_state["pid"]
+
+    if pid is None:
+        raise HTTPException(status_code=409, detail="No PID available.")
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        log.info("Sent SIGTERM to scraper pid=%d", pid)
+        return {"ok": True, "message": f"SIGTERM sent to pid {pid}."}
+    except ProcessLookupError:
+        return {"ok": False, "message": "Process already finished."}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/logs")
+def get_logs(lines: int = Query(100, ge=1, le=200)) -> dict:
+    """Return last N lines from the scraper subprocess log buffer."""
+    with _scraper_lock:
+        current_status = _scraper_state["status"]
+    log_lines = list(_log_buffer)[-lines:]
+    return {
+        "status": current_status,
+        "lines": log_lines,
+        "text": "\n".join(log_lines),
+    }
 
 
 @app.get("/jobs")
@@ -322,3 +397,257 @@ def clear_jobs() -> ClearResponse:
     except Exception as exc:
         log.error("Truncate failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Chaos-state endpoint
+# ---------------------------------------------------------------------------
+
+# uid → human name lookup (inverse of CATEGORY_UIDS)
+_UID_TO_NAME: dict[str, str] = {v: k for k, v in CATEGORY_UIDS.items()}
+
+CHAOS_STATE_PATH = Path(os.environ.get(
+    "CHAOS_STATE_FILE", "/app/data/chaos_state.json"))
+CHAOS_TARGET_PER_CAT = int(os.environ.get("CHAOS_TARGET_PER_CAT", "100"))
+
+
+@app.get("/chaos-state")
+def chaos_state() -> dict:
+    """Return per-category chaos scraper progress read from the state file.
+
+    Response shape:
+    {
+      "target_per_cat": 100,
+      "state_file": "/app/data/chaos_state.json",
+      "categories": [
+        {
+          "uid": "...",
+          "name": "Web, Mobile & Software Dev",
+          "collected": 62,
+          "visited_pages": 5,
+          "pct": 62.0
+        },
+        ...
+      ],
+      "total_collected": 744
+    }
+    """
+    if not CHAOS_STATE_PATH.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"State file not found: {CHAOS_STATE_PATH}",
+        )
+
+    try:
+        raw = json.loads(CHAOS_STATE_PATH.read_text())
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Cannot read state file: {exc}")
+
+    categories = []
+    total_collected = 0
+    for uid, data in raw.items():
+        collected = data.get("collected", 0)
+        visited_pages = len(data.get("visited_pages", []))
+        pct = round(min(collected / CHAOS_TARGET_PER_CAT * 100, 100), 1)
+        total_collected += collected
+        categories.append({
+            "uid": uid,
+            "name": _UID_TO_NAME.get(uid, uid),
+            "collected": collected,
+            "visited_pages": visited_pages,
+            "pct": pct,
+        })
+
+    # Sort by name for consistent display
+    categories.sort(key=lambda c: c["name"])
+
+    return {
+        "target_per_cat": CHAOS_TARGET_PER_CAT,
+        "state_file": str(CHAOS_STATE_PATH),
+        "categories": categories,
+        "total_collected": total_collected,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Schedule endpoints
+# ---------------------------------------------------------------------------
+
+CRONTAB_PATH = "/etc/cron.d/scraper"
+CRON_MARKER = "SCRAPER_AUTO"
+CRON_CMD = "/app/scripts/scraper_runner.sh >> /var/log/scraper.log 2>&1"
+
+
+def _read_crontab() -> str:
+    try:
+        with open(CRONTAB_PATH) as f:
+            return f.read()
+    except FileNotFoundError:
+        # fallback: read crontab for current user
+        result = subprocess.run(
+            ["crontab", "-l"], capture_output=True, text=True)
+        return result.stdout if result.returncode == 0 else ""
+
+
+def _write_crontab(content: str) -> None:
+    try:
+        with open(CRONTAB_PATH, "w") as f:
+            f.write(content)
+        subprocess.run(["chmod", "644", CRONTAB_PATH], check=True)
+    except PermissionError:
+        # fallback: use crontab command
+        proc = subprocess.run(
+            ["crontab", "-"], input=content, text=True, capture_output=True)
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr)
+
+
+def _parse_cron_line(line: str) -> dict | None:
+    """Parse a cron line into components. Returns None if not a valid job."""
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    parts = line.split(None, 5)
+    if len(parts) < 6:
+        return None
+    return {
+        "minute": parts[0],
+        "hour": parts[1],
+        "dom": parts[2],
+        "month": parts[3],
+        "dow": parts[4],
+        "command": parts[5],
+        "enabled": True,
+    }
+
+
+def _build_cron_line(minute: str, hour: str, dom: str,
+                     month: str, dow: str) -> str:
+    return f"{minute} {hour} {dom} {month} {dow} {CRON_CMD}"
+
+
+@app.get("/schedule")
+def get_schedule() -> dict:
+    """Return current cron schedule for the scraper."""
+    content = _read_crontab()
+    jobs = []
+    enabled = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        # disabled line
+        if stripped.startswith("#!") and CRON_MARKER in stripped:
+            parsed = _parse_cron_line(stripped[2:].strip())
+            if parsed:
+                parsed["enabled"] = False
+                jobs.append(parsed)
+        elif not stripped.startswith("#") and CRON_CMD in stripped:
+            parsed = _parse_cron_line(stripped)
+            if parsed:
+                parsed["enabled"] = True
+                enabled = True
+                jobs.append(parsed)
+
+    # If no marker found, return current active cron lines with the command
+    if not jobs:
+        for line in content.splitlines():
+            if CRON_CMD in line and not line.strip().startswith("#"):
+                parsed = _parse_cron_line(line)
+                if parsed:
+                    parsed["enabled"] = True
+                    enabled = True
+                    jobs.append(parsed)
+
+    return {
+        "enabled": enabled,
+        "jobs": jobs,
+        "raw": content,
+    }
+
+
+class ScheduleSetRequest(BaseModel):
+    minute: str = "0"
+    hour: str = "8-22"
+    dom: str = "*"
+    month: str = "*"
+    dow: str = "1-6"
+    enabled: bool = True
+
+
+@app.post("/schedule", dependencies=[Depends(require_api_key)])
+def set_schedule(req: ScheduleSetRequest) -> dict:
+    """Set a new cron schedule for the scraper."""
+    content = _read_crontab()
+    new_line = _build_cron_line(
+        req.minute, req.hour, req.dom, req.month, req.dow)
+    if not req.enabled:
+        new_line = f"#! {CRON_MARKER} {new_line}"
+
+    # Remove existing scraper lines (active and disabled)
+    lines = []
+    for line in content.splitlines():
+        if CRON_CMD in line:
+            continue
+        lines.append(line)
+
+    # Strip trailing blank lines and add new entry
+    while lines and not lines[-1].strip():
+        lines.pop()
+    lines.append(f"# {CRON_MARKER}")
+    lines.append(new_line)
+    lines.append("")
+
+    try:
+        _write_crontab("\n".join(lines))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    log.info("Cron schedule updated: %s", new_line)
+    return {"ok": True, "line": new_line, "enabled": req.enabled}
+
+
+@app.post("/schedule/enable", dependencies=[Depends(require_api_key)])
+def enable_schedule() -> dict:
+    """Enable the cron schedule (uncomment existing line)."""
+    content = _read_crontab()
+    lines = []
+    changed = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#!") and CRON_CMD in stripped:
+            lines.append(stripped[2:].strip())
+            changed = True
+        else:
+            lines.append(line)
+    if not changed:
+        raise HTTPException(
+            status_code=404,
+            detail="No disabled schedule found. Use POST /schedule to set one.")
+    try:
+        _write_crontab("\n".join(lines))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True, "message": "Cron schedule enabled."}
+
+
+@app.post("/schedule/disable", dependencies=[Depends(require_api_key)])
+def disable_schedule() -> dict:
+    """Disable the cron schedule (comment out the line)."""
+    content = _read_crontab()
+    lines = []
+    changed = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if CRON_CMD in stripped and not stripped.startswith("#"):
+            lines.append(f"#! {CRON_MARKER} {stripped}")
+            changed = True
+        else:
+            lines.append(line)
+    if not changed:
+        raise HTTPException(
+            status_code=404, detail="No active schedule found.")
+    try:
+        _write_crontab("\n".join(lines))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True, "message": "Cron schedule disabled."}
