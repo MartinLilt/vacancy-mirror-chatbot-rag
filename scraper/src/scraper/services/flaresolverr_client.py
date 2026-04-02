@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from urllib.parse import urlparse
 from urllib import request
 from urllib.error import HTTPError, URLError
 
@@ -23,6 +24,26 @@ class FlareSolverrClient:
         """
         self.api_url = api_url
         logger.info(f"FlareSolverr client initialized: {api_url}")
+
+    @staticmethod
+    def _build_proxy_payload(proxy: str) -> dict[str, str]:
+        """Convert proxy URL to FlareSolverr proxy payload.
+
+        FlareSolverr/Chromium is more reliable when credentials are passed as
+        separate username/password fields instead of embedded in URL.
+        """
+        parsed = urlparse(proxy)
+        if not parsed.scheme or not parsed.hostname or not parsed.port:
+            raise ValueError(f"Invalid proxy URL: {proxy}")
+
+        payload: dict[str, str] = {
+            "url": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}",
+        }
+        if parsed.username:
+            payload["username"] = parsed.username
+        if parsed.password:
+            payload["password"] = parsed.password
+        return payload
 
     def solve(
         self, url: str, max_timeout: int = 60000, proxy: str | None = None
@@ -48,7 +69,7 @@ class FlareSolverrClient:
         }
 
         if proxy:
-            payload["proxy"] = {"url": proxy}
+            payload["proxy"] = self._build_proxy_payload(proxy)
 
         logger.info(f"Requesting FlareSolverr to solve: {url}")
         logger.debug(f"Payload: {json.dumps(payload, indent=2)}")

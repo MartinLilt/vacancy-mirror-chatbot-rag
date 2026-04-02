@@ -26,7 +26,7 @@ import logging
 import math
 import sys
 
-from scraper.categories import CATEGORY_UIDS, CATEGORY_TOTAL_JOBS
+from scraper.categories import CATEGORY_UIDS
 from scraper.services.postgres import ScraperPostgresService
 from scraper.services.upwork_scraper import (
     CategoryScraperService,
@@ -742,7 +742,11 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                 pass
         # Fresh state
         return {
-            uid: {"collected": 0, "visited_pages": []}
+            uid: {
+                "collected": 0,
+                "visited_pages": [],
+                "total_upwork_jobs": 0,
+            }
             for _, uid in all_cats
         }
 
@@ -763,30 +767,70 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
             return False
         return True
 
+    def apply_paging_totals(
+        cat_state: dict,
+        cat_name: str,
+        paging: dict[str, int],
+        *,
+        source: str,
+    ) -> None:
+        """Update real_max_page + total_upwork_jobs from paging payload.
+
+        Priority:
+        1) filter_total (sum of Experience level buckets) — authoritative.
+        2) paging.total — only allowed to raise the known limit.
+        """
+        filter_total = paging.get("filter_total", 0)
+        paging_total = paging.get("total", 0)
+        existing_real_max = cat_state.get("real_max_page", 0)
+
+        if filter_total > 0:
+            real_max = min(100, math.ceil(filter_total / PER_PAGE))
+            cat_state["total_upwork_jobs"] = filter_total
+            if existing_real_max != real_max:
+                cat_state["real_max_page"] = real_max
+                log.info(
+                    "   📏 [%s] real_max_page=%d (filter_total=%d, %s)",
+                    cat_name,
+                    real_max,
+                    filter_total,
+                    source,
+                )
+        elif paging_total > 0:
+            # Single-page paging.total can be context-sensitive; only raise.
+            real_max = min(100, math.ceil(paging_total / PER_PAGE))
+            if real_max > existing_real_max:
+                cat_state["real_max_page"] = real_max
+                cat_state["total_upwork_jobs"] = paging_total
+                log.info(
+                    "   📏 [%s] real_max_page=%d (paging_total=%d, raised, %s)",
+                    cat_name,
+                    real_max,
+                    paging_total,
+                    source,
+                )
+
     # ── Load state ────────────────────────────────────────────────────
     state = load_state()
     if args.reset:
         log.info("🔄 State reset requested — starting fresh")
 
-    # ── Pre-seed real_max_page from known total_jobs if missing ───────
-    # This prevents the scraper from picking random high page numbers
-    # (e.g. page 80) for categories that only have e.g. 42 pages.
-    # Values from CATEGORY_TOTAL_JOBS are updated weekly via scrape-categories.
+    # ── Normalize state keys + reset session defaults ──────────────────
+    # Requirement for manual chaos start:
+    # - total_upwork_jobs = 0
+    # - real_max_page = 0
+    # - visited_pages = []
+    # - collected = 0
+    # for all 12 categories before prepass/weighted collection begins.
     for _, uid in all_cats:
         cat_st = state.setdefault(uid, {"collected": 0, "visited_pages": []})
-        known_total = CATEGORY_TOTAL_JOBS.get(uid, 0)
-        if known_total > 0:
-            seeded_max = min(100, math.ceil(known_total / PER_PAGE))
-            existing_max = cat_st.get("real_max_page", 0)
-            if existing_max == 0 or existing_max > seeded_max:
-                # Only update if we have no data yet, or if stored value is
-                # clearly wrong (larger than what Upwork actually has)
-                cat_st["real_max_page"] = seeded_max
-                cat_st["total_upwork_jobs"] = known_total
-                log.info(
-                    "   📏 [%s] seeded real_max_page=%d (total=%d)",
-                    uid, seeded_max, known_total,
-                )
+        cat_st["collected"] = 0
+        cat_st["visited_pages"] = []
+        cat_st["real_max_page"] = 0
+        cat_st["total_upwork_jobs"] = 0
+
+    # Persist zeroed totals so UI/API shows a clean baseline immediately.
+    save_state(state)
     log.info(
         "📊 Chaos state loaded: %d categories tracked",
         len(state),
@@ -843,6 +887,37 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
         proxy_url=proxy_url,
     )
     await service.start_browser()
+
+    # ── One-time totals prepass (all 12 categories, random order) ─────
+    # Before weighted job collection, refresh total_upwork_jobs/real_max_page
+    # by probing page 1 and reading Experience-level derived totals.
+    prepass_order = all_cats[:]
+    random.shuffle(prepass_order)
+    log.info("🧭 Totals prepass started (all categories, random order)")
+    for idx, (cat_name, cat_uid) in enumerate(prepass_order, start=1):
+        if not time_ok():
+            log.warning("⏱️  Totals prepass stopped by time limit")
+            break
+
+        cat_state = state.setdefault(
+            cat_uid, {"collected": 0, "visited_pages": [], "total_upwork_jobs": 0}
+        )
+        log.info("   🧮 [%s] prepass %d/%d ...", cat_name, idx, len(prepass_order))
+        try:
+            _, pre_paging = await service.scrape_page_with_paging(
+                category_uid=cat_uid,
+                page=1,
+            )
+            apply_paging_totals(
+                cat_state,
+                cat_name,
+                pre_paging,
+                source="session prepass",
+            )
+        except Exception as exc:
+            log.warning("   ⚠️  [%s] prepass failed: %s", cat_name, exc)
+        finally:
+            save_state(state)
 
     total_inserted_session = 0
     total_pages_session = 0
@@ -906,9 +981,10 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                 visited = set(cat_state["visited_pages"])
                 # Use real max page discovered from paging data, or 100 cap.
                 # real_max_page is stored in state after first fetch.
+                # NOTE: real_max_page=0 means "unknown yet", not "zero pages".
                 max_possible = min(
                     100,
-                    cat_state.get("real_max_page", 100),
+                    cat_state.get("real_max_page") or 100,
                 )
                 all_possible = [
                     p for p in range(1, max_possible + 1)
@@ -977,6 +1053,37 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                     unique_pages[i:i + BATCH_SIZE]
                     for i in range(0, len(unique_pages), BATCH_SIZE)
                 ]
+                total_steps = len(page_batches) + 1  # include pre-step 0
+
+                # ── Pre-step: refresh true category total (batch 0/N) ──────
+                # Before collecting jobs, hit page 1 once to refresh
+                # Experience-level derived totals (filter_total). This keeps
+                # chaos-state Upwork totals accurate for UI and planning.
+                if time_ok() and cat_state["collected"] < args.target_per_cat:
+                    log.info(
+                        "   🧮 [%s] batch 0/%d: refresh category total...",
+                        cat_name,
+                        total_steps,
+                    )
+                    try:
+                        _, pre_paging = await service.scrape_page_with_paging(
+                            category_uid=cat_uid,
+                            page=1,
+                        )
+                        apply_paging_totals(
+                            cat_state,
+                            cat_name,
+                            pre_paging,
+                            source="pre-step",
+                        )
+                        save_state(state)
+                    except Exception as exc:
+                        log.warning(
+                            "   ⚠️  [%s] batch 0/%d failed: %s",
+                            cat_name,
+                            total_steps,
+                            exc,
+                        )
 
                 for batch_idx, batch in enumerate(page_batches):
                     if not time_ok():
@@ -1004,7 +1111,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                         log.info(
                             "   📄 [%s] page %d (batch %d/%d) ...",
                             cat_name, page_num,
-                            batch_idx + 1, len(page_batches),
+                            batch_idx + 1, total_steps,
                         )
 
                         try:
@@ -1033,48 +1140,12 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                             save_state(state)
                             continue
 
-                        # Update real_max_page from paging info.
-                        # Prefer filter_total (sum of experience level
-                        # counts) over paging.total — paging.total is
-                        # capped at 5000 by Upwork but filter counts
-                        # show the true number of jobs in the category.
-                        # IMPORTANT: paging.total from a single page is
-                        # unreliable (shows only results for that page's
-                        # context). Only use it to INCREASE real_max_page,
-                        # never to decrease it. filter_total is always
-                        # authoritative and can raise or lower the limit.
-                        filter_total = paging.get("filter_total", 0)
-                        paging_total = paging.get("total", 0)
-                        existing_real_max = cat_state.get("real_max_page", 0)
-
-                        if filter_total > 0:
-                            # filter_total is authoritative — always trust it
-                            real_max = min(
-                                100, math.ceil(filter_total / PER_PAGE)
-                            )
-                            cat_state["total_upwork_jobs"] = filter_total
-                            if existing_real_max != real_max:
-                                cat_state["real_max_page"] = real_max
-                                log.info(
-                                    "   📏 [%s] real_max_page=%d "
-                                    "(filter_total=%d)",
-                                    cat_name, real_max, filter_total,
-                                )
-                        elif paging_total > 0:
-                            # paging_total: only raise real_max, never lower
-                            # (single-page totals can be misleading)
-                            real_max = min(
-                                100, math.ceil(paging_total / PER_PAGE)
-                            )
-                            if real_max > existing_real_max:
-                                cat_state["real_max_page"] = real_max
-                                cat_state["total_upwork_jobs"] = paging_total
-                                log.info(
-                                    "   📏 [%s] real_max_page=%d "
-                                    "(paging_total=%d, raised)",
-                                    cat_name, real_max, paging_total,
-                                )
-                            # else: keep existing (seeded or higher value)
+                        apply_paging_totals(
+                            cat_state,
+                            cat_name,
+                            paging,
+                            source=f"page {page_num}",
+                        )
 
                         cat_state["visited_pages"].append(page_num)
 
@@ -1165,7 +1236,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                     log.info(
                         "   ✅ [%s] batch %d/%d: +%d new jobs, "
                         "%d dups (total=%d/%d)",
-                        cat_name, batch_idx + 1, len(page_batches),
+                        cat_name, batch_idx + 1, total_steps,
                         inserted, dups,
                         cat_state["collected"], args.target_per_cat,
                     )
@@ -1240,6 +1311,17 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
             done, name, s["collected"], args.target_per_cat,
         )
     log.info("═" * 60)
+
+    # Reset table for next session start/stop/finish UX in Grafana.
+    for _, uid in all_cats:
+        state[uid] = {
+            "collected": 0,
+            "visited_pages": [],
+            "real_max_page": 0,
+            "total_upwork_jobs": 0,
+        }
+    save_state(state)
+    log.info("🧹 Chaos state reset to zero baseline for next session.")
 
 
 async def _cmd_warmup(args: argparse.Namespace) -> None:

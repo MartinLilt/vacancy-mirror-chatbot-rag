@@ -451,6 +451,11 @@ class UpworkScraperService:
         self.checkpoint_dir = checkpoint_dir or Path("data/checkpoints")
         self.user_data_dir = user_data_dir
         self.proxy_url = proxy_url
+        # Dedicated proxy for FlareSolverr (can differ from browser proxy).
+        # Fallback to scraper proxy for safer default when set.
+        self.flaresolverr_proxy_url = os.environ.get(
+            "FLARESOLVERR_PROXY_URL"
+        ) or proxy_url
         self.cookie_backup_path = (
             cookie_backup_path or Path("data/session_cookies.json")
         )
@@ -639,7 +644,7 @@ class UpworkScraperService:
             solution = self.flaresolverr.solve(
                 url=url,
                 max_timeout=60000,  # 60 seconds
-                proxy=None,  # Direct connection for FlareSolverr
+                proxy=self.flaresolverr_proxy_url,
             )
 
             log.info(
