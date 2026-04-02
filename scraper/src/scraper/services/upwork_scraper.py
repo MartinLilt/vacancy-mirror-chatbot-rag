@@ -225,7 +225,10 @@ class UpworkScraperService:
             "FLARESOLVERR_URL", "http://localhost:8191/v1"
         )
         self.flaresolverr = FlareSolverrClient(api_url=flaresolverr_url)
-        self._cf_solved = False  # Track if we've already solved CF
+        # True once Cloudflare cookies are injected into the browser.
+        # While True we navigate directly (no FlareSolverr) — much faster.
+        # Reset to False if Cloudflare challenge re-appears.
+        self._cf_solved = False
 
     def _random_delay(self) -> float:
         """Return a uniformly sampled delay from [min, max].
@@ -597,12 +600,30 @@ class UpworkScraperService:
     async def _get_nuxt(self) -> dict[str, Any] | None:
         """Extract window.__NUXT__ from the current page.
 
+        Upwork ships ``window.__NUXT__`` as an IIFE:
+            window.__NUXT__ = (function(a,b,...){return {...}}(v1,v2,...))
+        The browser evaluates the IIFE immediately on page load, so by the
+        time we call this method ``window.__NUXT__`` should already be a
+        plain object.  But just in case it's still a callable (e.g. the
+        script tag hasn't finished), we invoke it ourselves.
+
         Returns:
             Parsed dict, or None if unavailable.
         """
         assert self.page is not None
         raw: str = await self.page.evaluate(
-            "JSON.stringify(window.__NUXT__ || null)"
+            """
+            (function() {
+                try {
+                    var n = window.__NUXT__;
+                    if (!n) return null;
+                    if (typeof n === 'function') { n = n(); }
+                    return JSON.stringify(n);
+                } catch(e) {
+                    return null;
+                }
+            })()
+            """
         )
         if not raw or raw == "null":
             return None
@@ -612,15 +633,86 @@ class UpworkScraperService:
             log.error("JSON parse error in __NUXT__: %s", exc)
             return None
 
+    async def _inject_flaresolverr_cookies(
+        self,
+        cookies: list[dict[str, Any]],
+        user_agent: str = "",
+    ) -> None:
+        """Inject FlareSolverr cookies + user-agent into the nodriver browser.
+
+        Uses CDP ``Network.setCookie`` for each cookie and
+        ``Network.setUserAgentOverride`` so subsequent requests look like
+        the same browser that solved Cloudflare.
+
+        Args:
+            cookies: List of cookie dicts from FlareSolverr response.
+                     Expected keys: name, value, domain, path,
+                     secure, httpOnly.
+            user_agent: User-Agent string returned by FlareSolverr.
+        """
+        assert self.page is not None
+        cdp_network = __import__("nodriver.cdp").cdp.network
+
+        injected = 0
+        for cookie in cookies:
+            try:
+                await self.page.send(
+                    cdp_network.set_cookie(
+                        name=cookie["name"],
+                        value=cookie["value"],
+                        domain=cookie.get("domain", ".upwork.com"),
+                        path=cookie.get("path", "/"),
+                        secure=cookie.get("secure", True),
+                        http_only=cookie.get("httpOnly", False),
+                        same_site=(
+                            cdp_network.CookieSameSite(
+                                cookie["sameSite"]
+                            )
+                            if cookie.get("sameSite")
+                            else None
+                        ),
+                    )
+                )
+                injected += 1
+            except Exception as exc:
+                log.warning(
+                    "Failed to inject cookie %s: %s",
+                    cookie.get("name"), exc,
+                )
+
+        if user_agent:
+            try:
+                await self.page.send(
+                    cdp_network.set_user_agent_override(user_agent=user_agent)
+                )
+                log.debug("User-Agent set to: %s", user_agent[:80])
+            except Exception as exc:
+                log.warning("Failed to set user-agent: %s", exc)
+
+        log.info(
+            "🍪 Injected %d/%d FlareSolverr cookies into browser session.",
+            injected, len(cookies),
+        )
+
     async def _load_page_with_retry(
         self,
         url: str,
         page_num: int,
     ) -> list[dict[str, Any]] | None:
-        """Load a single page, retrying on failure.
+        """Load a single Upwork search page and extract jobs.
 
-        Uses FlareSolverr to get HTML, then loads it in nodriver browser
-        to execute JavaScript and extract __NUXT__.
+        Strategy (fast-path first):
+        1. If Cloudflare was already solved in this session
+           (``_cf_solved=True``), navigate directly with ``page.get(url)``
+           — no FlareSolverr call needed.  Each page takes ~5-10 s instead
+           of ~60 s.
+        2. If we get a Cloudflare challenge back (detected via
+           ``_is_cloudflare_block``), reset ``_cf_solved=False`` and fall
+           through to step 3.
+        3. Call FlareSolverr to solve Cloudflare, inject the returned
+           cookies into the nodriver browser, then navigate to the URL.
+           After success set ``_cf_solved=True`` so all subsequent pages
+           skip FlareSolverr.
 
         Args:
             url: Full Upwork search URL.
@@ -632,16 +724,49 @@ class UpworkScraperService:
         assert self.page is not None
 
         for attempt in range(1, self.max_retries + 1):
-            log.debug(
-                "Loading page %d (attempt %d/%d): %s",
-                page_num, attempt, self.max_retries, url,
-            )
-
-            # Exponential backoff: 10s → 30s → 90s
             backoff = self.retry_delay * (3 ** (attempt - 1))
 
-            # Get HTML from FlareSolverr (bypasses Cloudflare)
             try:
+                # ── Fast path: browser already has CF cookies ──────────
+                if self._cf_solved:
+                    log.info(
+                        "⚡ [page %d] Direct navigation (CF already solved)",
+                        page_num,
+                    )
+                    await self.page.get(url)
+                    # Give Nuxt time to hydrate (8 s is safer than 5 s
+                    # for the 185 KB IIFE Upwork injects)
+                    await asyncio.sleep(8)
+
+                    html_check: str = await self.page.evaluate(
+                        "document.documentElement.outerHTML"
+                    )
+                    if _is_cloudflare_block(html_check):
+                        log.warning(
+                            "☁️  Cloudflare re-appeared on page %d — "
+                            "re-solving via FlareSolverr …", page_num,
+                        )
+                        self._cf_solved = False
+                        # fall through to FlareSolverr path below
+                    else:
+                        nuxt = await self._get_nuxt()
+                        if nuxt is not None:
+                            jobs = _extract_jobs(nuxt)
+                            return jobs
+                        # __NUXT__ missing despite good HTML — retry
+                        log.warning(
+                            "No __NUXT__ on direct-nav page %d "
+                            "(attempt %d/%d)",
+                            page_num, attempt, self.max_retries,
+                        )
+                        if attempt < self.max_retries:
+                            await asyncio.sleep(backoff)
+                        continue
+
+                # ── Slow path: solve Cloudflare with FlareSolverr ──────
+                log.info(
+                    "🔥 Solving Cloudflare with FlareSolverr for: %s", url
+                )
                 solution = await self._solve_cloudflare_with_flaresolverr(
                     url
                 )
@@ -657,31 +782,51 @@ class UpworkScraperService:
                         await asyncio.sleep(backoff)
                     continue
 
-                # Fix 3: Detect Cloudflare / ban page before processing
                 if _is_cloudflare_block(html):
                     log.error(
-                        "🚫 Ban/Cloudflare page detected on page %d "
-                        "(attempt %d/%d) — stopping category scrape.",
+                        "🚫 FlareSolverr could not bypass Cloudflare "
+                        "on page %d (attempt %d/%d)",
                         page_num, attempt, self.max_retries,
                     )
-                    return None  # hard stop — do not retry
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(backoff)
+                    continue
 
-                # Load HTML into nodriver page to execute JavaScript
-                await self.page.evaluate(
-                    f"document.open(); "
-                    f"document.write({json.dumps(html)}); "
-                    f"document.close();"
+                # Inject CF cookies into browser then navigate
+                cookies = solution.get("cookies", [])
+                user_agent = solution.get("userAgent", "")
+                await self._inject_flaresolverr_cookies(
+                    cookies, user_agent
+                )
+                await self.page.get(url)
+                # Give Nuxt time to hydrate after cookie-based nav
+                await asyncio.sleep(8)
+
+                # Verify we got real content
+                html_check = await self.page.evaluate(
+                    "document.documentElement.outerHTML"
+                )
+                if _is_cloudflare_block(html_check):
+                    log.error(
+                        "🚫 Cloudflare still blocking after cookie inject "
+                        "on page %d (attempt %d/%d)",
+                        page_num, attempt, self.max_retries,
+                    )
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(backoff)
+                    continue
+
+                self._cf_solved = True
+                log.info(
+                    "✅ CF solved! Browser session active — subsequent "
+                    "pages will navigate directly."
                 )
 
-                # Wait for JS to execute
-                await asyncio.sleep(2)
-
-                # Extract __NUXT__ via JavaScript
                 nuxt = await self._get_nuxt()
                 if nuxt is None:
                     log.warning(
-                        "No __NUXT__ after loading FlareSolverr HTML "
-                        "for page %d (attempt %d/%d)",
+                        "No __NUXT__ after CF solve on page %d "
+                        "(attempt %d/%d)",
                         page_num, attempt, self.max_retries,
                     )
                     if attempt < self.max_retries:
@@ -689,20 +834,6 @@ class UpworkScraperService:
                     continue
 
                 jobs = _extract_jobs(nuxt)
-                if not jobs and attempt < self.max_retries:
-                    log.warning(
-                        "Empty jobs on page %d (attempt %d/%d), "
-                        "retrying.",
-                        page_num, attempt, self.max_retries,
-                    )
-                    await asyncio.sleep(backoff)
-                    continue
-
-                # Random delay between pages
-                delay = self._random_delay()
-                log.debug("Waiting %.2fs before next page...", delay)
-                await asyncio.sleep(delay)
-
                 return jobs
 
             except Exception as e:

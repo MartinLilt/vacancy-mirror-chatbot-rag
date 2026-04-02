@@ -399,6 +399,94 @@ def clear_jobs() -> ClearResponse:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.post("/scrape-chaos", dependencies=[Depends(require_api_key)])
+def trigger_scrape_chaos() -> ScrapeResponse:
+    """Trigger one chaos scraper session manually (same as cron fires).
+
+    Runs: python -m scraper.cli scrape-chaos --max-runtime-minutes 50
+    Returns 409 if already running.
+    """
+    with _scraper_lock:
+        if _scraper_state["status"] == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="Scraper already running. Wait for it to finish.",
+            )
+        from datetime import datetime, timezone
+        _scraper_state["status"] = "running"
+        _scraper_state["started_at"] = datetime.now(timezone.utc).isoformat()
+        _scraper_state["category_uid"] = "chaos"
+        _scraper_state["category_name"] = "chaos-all-categories"
+        _scraper_state["max_pages"] = None
+        _scraper_state["pid"] = None
+
+    _log_buffer.clear()
+    thread = threading.Thread(
+        target=_run_scraper_chaos, daemon=True)
+    thread.start()
+
+    return ScrapeResponse(ok=True, message="Chaos scraper session started.")
+
+
+def _run_scraper_chaos() -> None:
+    """Launch scrape-chaos CLI in subprocess and stream logs."""
+    from datetime import datetime, timezone
+
+    cmd = [
+        "python", "-m", "scraper.cli", "scrape-chaos",
+        "--max-runtime-minutes", "50",
+        "--stop-at-hour", "24",
+    ]
+
+    _push_log(f"{'='*60}")
+    _push_log(
+        f"▶ CHAOS SESSION  "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    _push_log("  Mode: all categories, target 100 jobs each")
+    _push_log(f"{'='*60}")
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        with _scraper_lock:
+            _scraper_state["pid"] = proc.pid
+        _push_log(f"  PID {proc.pid} — subprocess launched")
+
+        for line in proc.stdout:
+            stripped = line.rstrip()
+            if stripped:
+                _push_log(stripped)
+
+        proc.wait()
+        rc = proc.returncode
+        _push_log(f"{'='*60}")
+        if rc == 0:
+            _push_log(
+                f"✅ CHAOS FINISHED  rc={rc}  "
+                f"{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
+        else:
+            _push_log(
+                f"❌ CHAOS FAILED    rc={rc}  "
+                f"{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
+        _push_log(f"{'='*60}")
+    except Exception as exc:
+        _push_log(f"❌ SUBPROCESS ERROR: {exc}")
+        log.error("Chaos subprocess error: %s", exc)
+    finally:
+        with _scraper_lock:
+            _scraper_state["status"] = "idle"
+            _scraper_state["pid"] = None
+            _scraper_state["started_at"] = None
+            _scraper_state["category_uid"] = None
+            _scraper_state["category_name"] = None
+            _scraper_state["max_pages"] = None
+
+
 # ---------------------------------------------------------------------------
 # Chaos-state endpoint
 # ---------------------------------------------------------------------------
