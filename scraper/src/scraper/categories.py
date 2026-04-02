@@ -132,6 +132,27 @@ CATEGORY_UIDS: dict[str, str] = {
     "Writing": "531770282580668423",
 }
 
+# ---------------------------------------------------------------------------
+# Known total_jobs per category (from scrape-categories run 2026-03-26).
+# Used to pre-seed real_max_page in chaos state so the scraper never
+# wastes attempts on non-existent pages.
+# Formula: real_max_page = min(100, ceil(total_jobs / 50))
+# ---------------------------------------------------------------------------
+CATEGORY_TOTAL_JOBS: dict[str, int] = {
+    "531770282584862721": 7_809,   # Accounting & Consulting
+    "531770282580668416": 12_648,  # Admin Support
+    "531770282580668417": 3_233,   # Customer Service
+    "531770282580668420": 4_290,   # Data Science & Analytics
+    "531770282580668421": 40_764,  # Design & Creative
+    "531770282584862722": 7_209,   # Engineering & Architecture
+    "531770282580668419": 3_072,   # IT & Networking
+    "531770282584862723": 2_167,   # Legal
+    "531770282580668422": 32_043,  # Sales & Marketing
+    "531770282584862720": 2_070,   # Translation
+    "531770282580668418": 31_929,  # Web, Mobile & Software Dev
+    "531770282580668423": 4_969,   # Writing
+}
+
 # All Upwork job categories grouped by parent.
 # Keys are parent category names (must match keys in CATEGORY_UIDS).
 # Values are lists of subcategory display names.

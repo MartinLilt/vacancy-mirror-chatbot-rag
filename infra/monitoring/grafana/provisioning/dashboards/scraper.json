@@ -231,48 +231,17 @@
     },
     {
       "id": 7,
-      "title": "Recent Jobs (last 50)",
-      "type": "table",
+      "title": "📊 Category Scraping Progress",
+      "type": "text",
       "gridPos": {
         "x": 0,
         "y": 36,
         "w": 24,
-        "h": 10
+        "h": 14
       },
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "PCC52D03280B7034C"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "PCC52D03280B7034C"
-          },
-          "rawSql": "SELECT uid, title, category_uid, hourly_rate_min, hourly_rate_max, scraped_at FROM raw_jobs ORDER BY scraped_at DESC LIMIT 50",
-          "format": "table",
-          "refId": "A"
-        }
-      ],
       "options": {
-        "sortBy": [
-          {
-            "displayName": "scraped_at",
-            "desc": true
-          }
-        ]
-      },
-      "fieldConfig": {
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "scraped_at" },
-            "properties": [{ "id": "unit", "value": "dateTimeAsLocal" }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "title" },
-            "properties": [{ "id": "custom.width", "value": 400 }]
-          }
-        ]
+        "mode": "html",
+        "content": "<style>*{box-sizing:border-box}#cat-wrap{height:100%;overflow-y:auto;background:#0d0d0d;border-radius:6px;padding:10px 14px;font-family:'Courier New',monospace;color:#d4d4d4}#cat-wrap h3{margin:0 0 8px;font-size:13px;color:#69f0ae;letter-spacing:.04em}table{width:100%;border-collapse:collapse;font-size:11.5px}th{text-align:left;color:#888;font-weight:normal;padding:3px 6px;border-bottom:1px solid #222;white-space:nowrap}td{padding:3px 6px;vertical-align:middle;white-space:nowrap}.bar-cell{width:160px}.bar-bg{background:#1e1e1e;border-radius:3px;height:10px;width:160px;overflow:hidden}.bar-fill{height:10px;border-radius:3px;transition:width .4s}.pages-pill{display:inline-block;background:#1a2a1a;border:1px solid #2a4a2a;border-radius:10px;padding:1px 7px;font-size:10px;color:#69f0ae;margin-right:3px}.pages-visited{color:#42a5f5;font-size:10px}.upwork-total{color:#888;font-size:10px}.pct-num{color:#fff;font-weight:bold;min-width:38px;display:inline-block;text-align:right}.cat-name{color:#e0e0e0;max-width:180px;overflow:hidden;text-overflow:ellipsis}.good{color:#69f0ae}.mid{color:#ffa726}.low{color:#ef5350}#footer{margin-top:8px;color:#555;font-size:10px;text-align:right}#last-update{color:#444;font-size:10px}</style><div id=\"cat-wrap\"><h3>Category Scraping Progress <span id=\"last-update\"></span></h3><table><thead><tr><th>#</th><th>Category</th><th>Upwork jobs</th><th>Max pages</th><th>Pages visited</th><th style=\"width:160px\">Collected / Target</th><th>%</th><th>Collectable</th></tr></thead><tbody id=\"cat-tbody\"><tr><td colspan=\"8\" style=\"color:#555;padding:20px;text-align:center\">Loading...</td></tr></tbody></table><div id=\"footer\">Auto-refresh every 30s</div></div><script>(function(){const API='http://178.104.110.28:8000';const PER_PAGE=50;function barColor(pct){return pct>=100?'#69f0ae':pct>=50?'#42a5f5':pct>=20?'#ffa726':'#ef5350';}function fmtNum(n){if(!n&&n!==0)return'—';return n.toLocaleString();}function render(d){const cats=d.categories||[];const target=d.target_per_cat||1000;cats.sort((a,b)=>b.collected-a.collected);const tbody=document.getElementById('cat-tbody');tbody.innerHTML='';cats.forEach((c,i)=>{const pct=Math.min(100,Math.round(c.collected/target*100));const col=barColor(pct);const pctCls=pct>=100?'good':pct>=50?'mid':'low';const upworkJobs=c.total_upwork_jobs||0;const realMax=c.real_max_page||0;const maxPages=realMax?Math.min(realMax,100):('—');const maxCollect=c.max_collectable?fmtNum(c.max_collectable):'—';const visitedPages=c.visited_pages||0;const visitedList=(c.visited_pages_list||[]).slice(0,8).join(', ')+(c.visited_pages_list&&c.visited_pages_list.length>8?'…':'');const tr=document.createElement('tr');tr.innerHTML='<td style=\"color:#555\">'+(i+1)+'</td>'+'<td class=\"cat-name\">'+(c.name||c.uid)+'</td>'+'<td class=\"upwork-total\">'+fmtNum(upworkJobs)+'</td>'+'<td style=\"color:#ce93d8\">'+maxPages+'</td>'+'<td><span class=\"pages-visited\">'+visitedPages+' pages</span>'+(visitedList?'<br><span style=\"color:#444;font-size:9px\">'+visitedList+'</span>':'')+'</td>'+'<td class=\"bar-cell\"><div class=\"bar-bg\"><div class=\"bar-fill\" style=\"width:'+pct+'%;background:'+col+'\"></div></div></td>'+'<td><span class=\"pct-num '+pctCls+'\">'+pct+'%</span> <span style=\"color:#555;font-size:10px\">'+c.collected+'/'+target+'</span></td>'+'<td style=\"color:#888;font-size:10px\">'+maxCollect+'</td>';tbody.appendChild(tr);});document.getElementById('last-update').textContent='— updated '+new Date().toLocaleTimeString();}function load(){fetch(API+'/chaos-state').then(r=>r.json()).then(d=>{render(d);}).catch(e=>{document.getElementById('cat-tbody').innerHTML='<tr><td colspan=\"8\" style=\"color:#ef5350;padding:10px\">Error: '+e.message+'</td></tr>';});}load();setInterval(load,30000);})();</script>"
       }
     },
     {
@@ -446,5 +415,5 @@
     }
   ],
   "schemaVersion": 36,
-  "version": 2
+  "version": 3
 }

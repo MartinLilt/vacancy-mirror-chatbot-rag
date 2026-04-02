@@ -540,7 +540,18 @@ def chaos_state() -> dict:
     total_collected = 0
     for uid, data in raw.items():
         collected = data.get("collected", 0)
-        visited_pages = len(data.get("visited_pages", []))
+        visited_list = data.get("visited_pages", [])
+        visited_pages = len(visited_list)
+        real_max_page = data.get("real_max_page", 0)
+        # total_upwork_jobs: reverse from real_max_page (approx)
+        # real_max_page was computed as ceil(total / PER_PAGE), PER_PAGE=50
+        # We store the value directly if available
+        total_upwork_jobs = data.get("total_upwork_jobs", 0)
+        if not total_upwork_jobs and real_max_page:
+            # approximate: we know at least real_max_page * 50 - 49 jobs exist
+            total_upwork_jobs = real_max_page * 50  # upper bound approx
+        max_collectable = min(real_max_page, 100) * \
+            50 if real_max_page else None
         pct = round(min(collected / CHAOS_TARGET_PER_CAT * 100, 100), 1)
         total_collected += collected
         categories.append({
@@ -548,6 +559,10 @@ def chaos_state() -> dict:
             "name": _UID_TO_NAME.get(uid, uid),
             "collected": collected,
             "visited_pages": visited_pages,
+            "visited_pages_list": sorted(visited_list),
+            "real_max_page": real_max_page,
+            "total_upwork_jobs": total_upwork_jobs,
+            "max_collectable": max_collectable,
             "pct": pct,
         })
 

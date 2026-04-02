@@ -70,15 +70,17 @@ MAX_ALLOWED_PAGE = 100
 
 # Strings that indicate Cloudflare challenge page.
 # IMPORTANT: must be unique to the challenge page, NOT present in normal
-# Upwork HTML. "cf_clearance" and "Just a moment" appear in normal pages
-# so they must NOT be listed here.
+# Upwork HTML.
+# Confirmed false positives (present on normal Upwork pages, DO NOT ADD):
+#   "cf_clearance"              — cookie name in every page's JS
+#   "Just a moment"             — appears in normal Upwork content
+#   "/cdn-cgi/challenge-platform" — Upwork loads challenge-platform/scripts/jsd/main.js
+#                                   on ALL pages (CF Bot Management, not a challenge)
 _CF_INDICATORS: tuple[str, ...] = (
     "challenges.cloudflare.com",
     "cf-browser-verification",
     "Enable JavaScript and cookies to continue",
     "Checking if the site connection is secure",
-    "ray-id",
-    "/cdn-cgi/challenge-platform",
 )
 
 # Strings that indicate Upwork soft-ban / CAPTCHA / access denied
@@ -143,6 +145,128 @@ def _extract_paging(nuxt: dict[str, Any]) -> dict[str, int]:
         .get("jobsSearch", {})
         .get("paging", {})
     )
+
+
+_FILTER_DUMP_DONE: bool = False  # log jobsSearch structure only once
+
+
+def _extract_total_from_filters(nuxt: dict[str, Any]) -> int | None:
+    """Sum Experience Level filter counts to get real category total.
+
+    Upwork shows filter counts like:
+        Entry Level (420), Intermediate (1,214), Expert (482)
+
+    These are stored in ``__NUXT__.state.jobsSearch`` under some key.
+    We search all top-level keys exhaustively and log the structure
+    once so we can discover the exact key name in production.
+
+    Returns the sum if the filter data is present, else None.
+    """
+    global _FILTER_DUMP_DONE
+
+    jobs_search: dict = nuxt.get("state", {}).get("jobsSearch", {})
+
+    # --- One-time diagnostic dump so we can see the real structure ---
+    if not _FILTER_DUMP_DONE:
+        _FILTER_DUMP_DONE = True
+        import json as _json
+
+        def _preview(v: Any, depth: int = 0) -> str:
+            if isinstance(v, list):
+                s = f"list[{len(v)}]"
+                if v and isinstance(v[0], dict) and depth == 0:
+                    s += f" first_keys={list(v[0].keys())[:6]}"
+                return s
+            if isinstance(v, dict):
+                return f"dict keys={list(v.keys())[:10]}"
+            return repr(v)[:60]
+
+        # Dump jobsSearch keys
+        js_preview = {k: _preview(v) for k, v in jobs_search.items()}
+        log.info("🔬 jobsSearch: %s",
+                 _json.dumps(js_preview, ensure_ascii=False))
+
+        # Dump ALL top-level state keys to find where filters live
+        state_obj = nuxt.get("state", {})
+        state_preview = {k: _preview(v) for k, v in state_obj.items()}
+        log.info("🔬 __NUXT__.state keys: %s",
+                 _json.dumps(state_preview, ensure_ascii=False))
+
+    # --- Exhaustive search through ALL keys in jobsSearch ---
+    for key, val in jobs_search.items():
+        if not val:
+            continue
+        # val can be a list of filter groups, or a dict, or nested
+        candidates: list = val if isinstance(val, list) else [val]
+        for group in candidates:
+            if not isinstance(group, dict):
+                continue
+            # Match experience-level / contractorTier group by name/id
+            name = (
+                group.get("name") or group.get("id") or
+                group.get("type") or group.get("field") or ""
+            ).lower()
+            if any(k in name for k in (
+                "contractortier", "experience", "tier", "level",
+                "contractor_tier", "experiencetier",
+            )):
+                buckets = (
+                    group.get("buckets") or group.get("options") or
+                    group.get("items") or group.get("values") or []
+                )
+                if buckets:
+                    total = sum(
+                        int(b.get("count", 0) or b.get("value", 0) or 0)
+                        for b in buckets
+                        if isinstance(b, dict)
+                    )
+                    if total > 0:
+                        log.info(
+                            "🔢 filter_total=%d from jobsSearch['%s'] "
+                            "group='%s' buckets=%s",
+                            total, key, name,
+                            [(b.get("label") or b.get("name") or b.get("id"),
+                              b.get("count")) for b in buckets],
+                        )
+                        return total
+            # Also check nested: group may contain a list under some key
+            for sub_key, sub_val in group.items():
+                if not isinstance(sub_val, list):
+                    continue
+                for sub_group in sub_val:
+                    if not isinstance(sub_group, dict):
+                        continue
+                    sub_name = (
+                        sub_group.get("name") or sub_group.get("id") or
+                        sub_group.get("type") or ""
+                    ).lower()
+                    if any(k in sub_name for k in (
+                        "contractortier", "experience", "tier", "level",
+                        "contractor_tier", "experiencetier",
+                    )):
+                        buckets = (
+                            sub_group.get("buckets") or
+                            sub_group.get("options") or
+                            sub_group.get("items") or []
+                        )
+                        if buckets:
+                            total = sum(
+                                int(b.get("count", 0) or b.get("value", 0) or 0)
+                                for b in buckets
+                                if isinstance(b, dict)
+                            )
+                            if total > 0:
+                                log.info(
+                                    "🔢 filter_total=%d from jobsSearch"
+                                    "['%s']['%s'] group='%s'",
+                                    total, key, sub_key, sub_name,
+                                )
+                                return total
+
+    if not _FILTER_DUMP_DONE:
+        log.info("🔬 jobsSearch is empty or missing in __NUXT__")
+
+    return None
 
 
 def _is_cloudflare_block(html: str, *, _log_trigger: bool = True) -> bool:
@@ -736,6 +860,24 @@ class UpworkScraperService:
             injected, len(cookies),
         )
 
+    async def _hard_navigate(self, url: str) -> None:
+        """Navigate to ``url`` with a guaranteed full page reload.
+
+        Upwork uses Nuxt/Vue SSG — when the browser is already on
+        ``upwork.com`` and we call ``page.get(url)`` for a different
+        search page, the framework intercepts the navigation and does a
+        client-side SPA transition.  In that case ``window.__NUXT__``
+        keeps the *old* state and the new jobs never appear in the DOM.
+
+        Fix: bounce through ``about:blank`` first so the next navigation
+        to the Upwork URL is always a fresh full HTTP request, not a
+        SPA route change.  This guarantees a new ``__NUXT__`` payload.
+        """
+        assert self.page is not None
+        await self.page.get("about:blank")
+        await asyncio.sleep(0.3)
+        await self.page.get(url)
+
     async def _load_page_with_retry(
         self,
         url: str,
@@ -786,7 +928,7 @@ class UpworkScraperService:
                         "⚡ [page %d] Direct navigation (CF already solved)",
                         page_num,
                     )
-                    await self.page.get(url)
+                    await self._hard_navigate(url)
                     # Give Nuxt time to hydrate (12 s is safer than 8 s
                     # for the 185 KB IIFE Upwork injects)
                     await asyncio.sleep(12)
@@ -806,6 +948,26 @@ class UpworkScraperService:
                         if nuxt is not None:
                             jobs = _extract_jobs(nuxt)
                             paging = _extract_paging(nuxt)
+                            # Try to get real total from experience filters
+                            filter_total = _extract_total_from_filters(nuxt)
+                            if filter_total:
+                                paging = dict(paging)
+                                paging["filter_total"] = filter_total
+                                log.info(
+                                    "🔢 [page %d] filter_total=%d "
+                                    "(paging.total=%d)",
+                                    page_num, filter_total,
+                                    paging.get("total", 0),
+                                )
+                            else:
+                                # Log NUXT keys once to help debug
+                                jobs_search = nuxt.get("state", {}).get(
+                                    "jobsSearch", {}
+                                )
+                                log.debug(
+                                    "jobsSearch keys: %s",
+                                    list(jobs_search.keys()),
+                                )
                             return jobs, paging
                         # __NUXT__ missing despite good HTML — retry
                         log.warning(
@@ -852,7 +1014,7 @@ class UpworkScraperService:
                 await self._inject_flaresolverr_cookies(
                     cookies, user_agent
                 )
-                await self.page.get(url)
+                await self._hard_navigate(url)
                 # Give Nuxt time to hydrate after cookie-based nav
                 await asyncio.sleep(12)
 
@@ -889,6 +1051,22 @@ class UpworkScraperService:
 
                 jobs = _extract_jobs(nuxt)
                 paging = _extract_paging(nuxt)
+                # Try to get real total from experience filters
+                filter_total = _extract_total_from_filters(nuxt)
+                if filter_total:
+                    paging = dict(paging)
+                    paging["filter_total"] = filter_total
+                    log.info(
+                        "🔢 [page %d] filter_total=%d (paging.total=%d)",
+                        page_num, filter_total, paging.get("total", 0),
+                    )
+                else:
+                    jobs_search = nuxt.get("state", {}).get(
+                        "jobsSearch", {}
+                    )
+                    log.debug(
+                        "jobsSearch keys: %s", list(jobs_search.keys())
+                    )
                 return jobs, paging
 
             except Exception as e:

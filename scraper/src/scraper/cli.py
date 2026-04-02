@@ -26,7 +26,7 @@ import logging
 import math
 import sys
 
-from scraper.categories import CATEGORY_UIDS
+from scraper.categories import CATEGORY_UIDS, CATEGORY_TOTAL_JOBS
 from scraper.services.postgres import ScraperPostgresService
 from scraper.services.upwork_scraper import (
     CategoryScraperService,
@@ -767,6 +767,26 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
     state = load_state()
     if args.reset:
         log.info("🔄 State reset requested — starting fresh")
+
+    # ── Pre-seed real_max_page from known total_jobs if missing ───────
+    # This prevents the scraper from picking random high page numbers
+    # (e.g. page 80) for categories that only have e.g. 42 pages.
+    # Values from CATEGORY_TOTAL_JOBS are updated weekly via scrape-categories.
+    for _, uid in all_cats:
+        cat_st = state.setdefault(uid, {"collected": 0, "visited_pages": []})
+        known_total = CATEGORY_TOTAL_JOBS.get(uid, 0)
+        if known_total > 0:
+            seeded_max = min(100, math.ceil(known_total / PER_PAGE))
+            existing_max = cat_st.get("real_max_page", 0)
+            if existing_max == 0 or existing_max > seeded_max:
+                # Only update if we have no data yet, or if stored value is
+                # clearly wrong (larger than what Upwork actually has)
+                cat_st["real_max_page"] = seeded_max
+                cat_st["total_upwork_jobs"] = known_total
+                log.info(
+                    "   📏 [%s] seeded real_max_page=%d (total=%d)",
+                    uid, seeded_max, known_total,
+                )
     log.info(
         "📊 Chaos state loaded: %d categories tracked",
         len(state),
@@ -1013,19 +1033,28 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                             save_state(state)
                             continue
 
-                        # Update real_max_page from paging info
-                        total_jobs_upwork = paging.get("total", 0)
+                        # Update real_max_page from paging info.
+                        # Prefer filter_total (sum of experience level
+                        # counts) over paging.total — paging.total is
+                        # capped at 5000 by Upwork but filter counts
+                        # show the true number of jobs in the category.
+                        filter_total = paging.get("filter_total", 0)
+                        paging_total = paging.get("total", 0)
+                        total_jobs_upwork = filter_total or paging_total
                         if total_jobs_upwork > 0:
                             real_max = min(
                                 100,
                                 math.ceil(total_jobs_upwork / PER_PAGE),
                             )
+                            # Always store the latest total from Upwork
+                            cat_state["total_upwork_jobs"] = total_jobs_upwork
                             if cat_state.get("real_max_page", 0) != real_max:
                                 cat_state["real_max_page"] = real_max
                                 log.info(
-                                    "   📏 [%s] real max page = %d "
-                                    "(total_jobs=%d)",
-                                    cat_name, real_max, total_jobs_upwork,
+                                    "   📏 [%s] real_max_page=%d "
+                                    "(filter_total=%d paging_total=%d)",
+                                    cat_name, real_max,
+                                    filter_total, paging_total,
                                 )
 
                         cat_state["visited_pages"].append(page_num)
