@@ -42,6 +42,9 @@ services:
       LOG_HTML: false
       CAPTCHA_SOLVER: none
       TZ: UTC
+      # Route FlareSolverr through the same residential proxy as Chrome
+      # so Upwork/Cloudflare always sees the residential IP, never Hetzner
+      PROXY_URL: ${PROXY_URL:-}
     ports:
       - "8191:8191"
 

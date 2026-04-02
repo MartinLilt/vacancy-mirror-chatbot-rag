@@ -1038,24 +1038,43 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                         # counts) over paging.total — paging.total is
                         # capped at 5000 by Upwork but filter counts
                         # show the true number of jobs in the category.
+                        # IMPORTANT: paging.total from a single page is
+                        # unreliable (shows only results for that page's
+                        # context). Only use it to INCREASE real_max_page,
+                        # never to decrease it. filter_total is always
+                        # authoritative and can raise or lower the limit.
                         filter_total = paging.get("filter_total", 0)
                         paging_total = paging.get("total", 0)
-                        total_jobs_upwork = filter_total or paging_total
-                        if total_jobs_upwork > 0:
+                        existing_real_max = cat_state.get("real_max_page", 0)
+
+                        if filter_total > 0:
+                            # filter_total is authoritative — always trust it
                             real_max = min(
-                                100,
-                                math.ceil(total_jobs_upwork / PER_PAGE),
+                                100, math.ceil(filter_total / PER_PAGE)
                             )
-                            # Always store the latest total from Upwork
-                            cat_state["total_upwork_jobs"] = total_jobs_upwork
-                            if cat_state.get("real_max_page", 0) != real_max:
+                            cat_state["total_upwork_jobs"] = filter_total
+                            if existing_real_max != real_max:
                                 cat_state["real_max_page"] = real_max
                                 log.info(
                                     "   📏 [%s] real_max_page=%d "
-                                    "(filter_total=%d paging_total=%d)",
-                                    cat_name, real_max,
-                                    filter_total, paging_total,
+                                    "(filter_total=%d)",
+                                    cat_name, real_max, filter_total,
                                 )
+                        elif paging_total > 0:
+                            # paging_total: only raise real_max, never lower
+                            # (single-page totals can be misleading)
+                            real_max = min(
+                                100, math.ceil(paging_total / PER_PAGE)
+                            )
+                            if real_max > existing_real_max:
+                                cat_state["real_max_page"] = real_max
+                                cat_state["total_upwork_jobs"] = paging_total
+                                log.info(
+                                    "   📏 [%s] real_max_page=%d "
+                                    "(paging_total=%d, raised)",
+                                    cat_name, real_max, paging_total,
+                                )
+                            # else: keep existing (seeded or higher value)
 
                         cat_state["visited_pages"].append(page_num)
 

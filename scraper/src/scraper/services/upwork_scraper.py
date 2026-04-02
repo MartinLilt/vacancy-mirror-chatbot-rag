@@ -47,6 +47,7 @@ import json
 import logging
 import os
 import random
+import re
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +99,40 @@ _BAN_INDICATORS: tuple[str, ...] = (
     "Please verify you are a human",
 )
 
+# Strings that indicate Chrome's built-in network error page
+# (ERR_TUNNEL_CONNECTION_FAILED, ERR_PROXY_CONNECTION_FAILED, etc.)
+# Returned when FlareSolverr cannot reach the target through the proxy.
+# The page is a local Chromium HTML page, NOT Upwork content.
+# Fingerprint: Chromium CSS variables (--google-blue-600, etc.).
+_CHROME_ERROR_INDICATORS: tuple[str, ...] = (
+    "--google-blue-600",          # unique to Chromium error page CSS
+    "--google-gray-700",          # same
+    "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_PROXY_CONNECTION_FAILED",
+    "ERR_CONNECTION_TIMED_OUT",
+    "ERR_NAME_NOT_RESOLVED",
+)
+
+
+def _is_chrome_error_page(html: str) -> bool:
+    """Return True if the HTML is Chrome's built-in network error page.
+
+    This happens when FlareSolverr's proxy is broken — Chrome cannot
+    reach the target URL and renders a local error page instead.
+    The page looks like real HTML (246 KB) but has no Upwork content.
+    """
+    # Chromium error pages always contain their CSS vars (≥2 matches)
+    matches = sum(1 for s in _CHROME_ERROR_INDICATORS if s in html)
+    if matches >= 2:
+        return True
+    # Secondary: title is the target domain but no upwork JS present
+    if (
+        "<title>www.upwork.com</title>" in html
+        and "upwork" not in html[1000:5000].lower()
+    ):
+        return True
+    return False
+
 
 def _build_url(
     category_uid: str,
@@ -127,6 +162,59 @@ def _build_url(
     return url
 
 
+def _parse_nuxt_from_html(html: str) -> dict[str, Any] | None:
+    """Extract and parse ``window.__NUXT__`` directly from raw HTML.
+
+    FlareSolverr returns the full rendered HTML of the page.  Upwork
+    embeds ``window.__NUXT__`` as a ``<script>`` tag with a large JSON-
+    like IIFE.  We extract the JSON payload using a regex on the
+    ``__NUXT_DATA__`` or ``__NUXT__`` script tag — whichever is present.
+
+    Upwork uses two formats depending on Nuxt version:
+      - Legacy: ``window.__NUXT__=(function(a,b,...){return {...}}(...))``
+      - Modern: ``<script type="application/json" id="__NUXT_DATA__">``
+
+    Returns parsed dict or None if not found / parse error.
+    """
+    # Modern Nuxt 3 format: <script id="__NUXT_DATA__" type="application/json">
+    m = re.search(
+        r'<script[^>]+id=["\']__NUXT_DATA__["\'][^>]*>(.*?)</script>',
+        html, re.DOTALL,
+    )
+    if m:
+        try:
+            raw = m.group(1).strip()
+            # __NUXT_DATA__ is a special array format — try direct parse
+            data = json.loads(raw)
+            # If it's a list (payload format), try to find the state dict
+            if isinstance(data, list):
+                # Nuxt 3 payload: first element is usually the state object
+                for item in data:
+                    if isinstance(item, dict) and "state" in item:
+                        return item
+                    if isinstance(item, dict) and "jobsSearch" in item:
+                        return {"state": item}
+            elif isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Legacy Nuxt 2 format: window.__NUXT__={...} (plain JSON object)
+    m = re.search(
+        r'window\.__NUXT__\s*=\s*(\{.*?\})\s*;?\s*</script>',
+        html, re.DOTALL,
+    )
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Legacy IIFE format: window.__NUXT__=(function(...){return {...}}(...))
+    # Too complex to eval safely — skip, rely on browser
+    return None
+
+
 def _extract_jobs(nuxt: dict[str, Any]) -> list[dict[str, Any]]:
     """Pull the jobs list out of the window.__NUXT__ payload."""
     return (
@@ -147,126 +235,92 @@ def _extract_paging(nuxt: dict[str, Any]) -> dict[str, int]:
     )
 
 
-_FILTER_DUMP_DONE: bool = False  # log jobsSearch structure only once
-
-
 def _extract_total_from_filters(nuxt: dict[str, Any]) -> int | None:
     """Sum Experience Level filter counts to get real category total.
 
-    Upwork shows filter counts like:
-        Entry Level (420), Intermediate (1,214), Expert (482)
+    Upwork stores filters in ``__NUXT__.state.jobsFilters.filters`` —
+    a list of filter-group dicts.  The contractorTier group contains
+    buckets for Entry Level / Intermediate / Expert whose counts sum
+    to the TRUE total (not capped at 5 000 like paging.total).
 
-    These are stored in ``__NUXT__.state.jobsSearch`` under some key.
-    We search all top-level keys exhaustively and log the structure
-    once so we can discover the exact key name in production.
-
-    Returns the sum if the filter data is present, else None.
+    Returns the sum if found, else None.
     """
-    global _FILTER_DUMP_DONE
+    state: dict = nuxt.get("state", {})
 
-    jobs_search: dict = nuxt.get("state", {}).get("jobsSearch", {})
-
-    # --- One-time diagnostic dump so we can see the real structure ---
-    if not _FILTER_DUMP_DONE:
-        _FILTER_DUMP_DONE = True
+    # Primary path: state.jobsFilters.filters (confirmed in production)
+    jobs_filters: dict = state.get("jobsFilters", {})
+    filters = jobs_filters.get("filters")
+    if filters and isinstance(filters, list):
+        # One-time dump to see filter group names
         import json as _json
+        groups_preview = [
+            {"name": g.get("name") or g.get("id"), "keys": list(g.keys())[:8]}
+            for g in filters if isinstance(g, dict)
+        ]
+        log.info("🔬 jobsFilters.filters groups: %s",
+                 _json.dumps(groups_preview, ensure_ascii=False))
+        total = _sum_tier_buckets(filters)
+        if total:
+            return total
 
-        def _preview(v: Any, depth: int = 0) -> str:
-            if isinstance(v, list):
-                s = f"list[{len(v)}]"
-                if v and isinstance(v[0], dict) and depth == 0:
-                    s += f" first_keys={list(v[0].keys())[:6]}"
-                return s
-            if isinstance(v, dict):
-                return f"dict keys={list(v.keys())[:10]}"
-            return repr(v)[:60]
-
-        # Dump jobsSearch keys
-        js_preview = {k: _preview(v) for k, v in jobs_search.items()}
-        log.info("🔬 jobsSearch: %s",
-                 _json.dumps(js_preview, ensure_ascii=False))
-
-        # Dump ALL top-level state keys to find where filters live
-        state_obj = nuxt.get("state", {})
-        state_preview = {k: _preview(v) for k, v in state_obj.items()}
-        log.info("🔬 __NUXT__.state keys: %s",
-                 _json.dumps(state_preview, ensure_ascii=False))
-
-    # --- Exhaustive search through ALL keys in jobsSearch ---
-    for key, val in jobs_search.items():
-        if not val:
+    # Fallback: scan all state keys that look like filter containers
+    for state_key, state_val in state.items():
+        if not isinstance(state_val, dict):
             continue
-        # val can be a list of filter groups, or a dict, or nested
-        candidates: list = val if isinstance(val, list) else [val]
-        for group in candidates:
-            if not isinstance(group, dict):
+        for val in state_val.values():
+            if not isinstance(val, list):
                 continue
-            # Match experience-level / contractorTier group by name/id
-            name = (
-                group.get("name") or group.get("id") or
-                group.get("type") or group.get("field") or ""
-            ).lower()
-            if any(k in name for k in (
-                "contractortier", "experience", "tier", "level",
-                "contractor_tier", "experiencetier",
-            )):
-                buckets = (
-                    group.get("buckets") or group.get("options") or
-                    group.get("items") or group.get("values") or []
+            total = _sum_tier_buckets(val)
+            if total:
+                log.info(
+                    "🔢 filter_total=%d found in state['%s']",
+                    total, state_key,
                 )
-                if buckets:
-                    total = sum(
-                        int(b.get("count", 0) or b.get("value", 0) or 0)
-                        for b in buckets
-                        if isinstance(b, dict)
-                    )
-                    if total > 0:
-                        log.info(
-                            "🔢 filter_total=%d from jobsSearch['%s'] "
-                            "group='%s' buckets=%s",
-                            total, key, name,
-                            [(b.get("label") or b.get("name") or b.get("id"),
-                              b.get("count")) for b in buckets],
-                        )
-                        return total
-            # Also check nested: group may contain a list under some key
-            for sub_key, sub_val in group.items():
-                if not isinstance(sub_val, list):
-                    continue
-                for sub_group in sub_val:
-                    if not isinstance(sub_group, dict):
-                        continue
-                    sub_name = (
-                        sub_group.get("name") or sub_group.get("id") or
-                        sub_group.get("type") or ""
-                    ).lower()
-                    if any(k in sub_name for k in (
-                        "contractortier", "experience", "tier", "level",
-                        "contractor_tier", "experiencetier",
-                    )):
-                        buckets = (
-                            sub_group.get("buckets") or
-                            sub_group.get("options") or
-                            sub_group.get("items") or []
-                        )
-                        if buckets:
-                            total = sum(
-                                int(b.get("count", 0) or b.get("value", 0) or 0)
-                                for b in buckets
-                                if isinstance(b, dict)
-                            )
-                            if total > 0:
-                                log.info(
-                                    "🔢 filter_total=%d from jobsSearch"
-                                    "['%s']['%s'] group='%s'",
-                                    total, key, sub_key, sub_name,
-                                )
-                                return total
-
-    if not _FILTER_DUMP_DONE:
-        log.info("🔬 jobsSearch is empty or missing in __NUXT__")
+                return total
 
     return None
+
+
+def _sum_tier_buckets(filter_groups: list) -> int:
+    """Search a list of filter-group dicts for the contractorTier group
+    and return the sum of bucket counts.  Returns 0 if not found."""
+    _TIER_KEYWORDS = (
+        "contractortier", "experience", "tier", "level",
+        "contractor_tier",
+    )
+    for group in filter_groups:
+        if not isinstance(group, dict):
+            continue
+        # group name/id can be str or anything — guard with str()
+        raw_name = group.get("name") or group.get("id") or ""
+        name = str(raw_name).lower()
+        if not any(k in name for k in _TIER_KEYWORDS):
+            continue
+        buckets = (
+            group.get("buckets") or group.get("options") or
+            group.get("items") or group.get("values") or []
+        )
+        if not buckets:
+            continue
+        total = 0
+        for b in buckets:
+            if not isinstance(b, dict):
+                continue
+            cnt = b.get("count") or b.get("value") or 0
+            try:
+                total += int(cnt)
+            except (TypeError, ValueError):
+                pass
+        if total > 0:
+            log.info(
+                "🔢 filter_total=%d (contractorTier buckets: %s)",
+                total,
+                [(str(b.get("label") or b.get("name") or b.get("id")),
+                  b.get("count")) for b in buckets
+                 if isinstance(b, dict)],
+            )
+            return total
+    return 0
 
 
 def _is_cloudflare_block(html: str, *, _log_trigger: bool = True) -> bool:
@@ -878,6 +932,49 @@ class UpworkScraperService:
         await asyncio.sleep(0.3)
         await self.page.get(url)
 
+    async def _poll_for_nuxt(
+        self,
+        page_num: int,
+        *,
+        timeout: float = 45.0,
+        interval: float = 2.0,
+    ) -> dict[str, Any] | None:
+        """Poll ``window.__NUXT__`` every ``interval`` seconds.
+
+        Upwork hydrates its Vuex/Pinia store asynchronously after the
+        initial page load.  A fixed ``asyncio.sleep`` often races with
+        this hydration.  This method polls until either:
+        - ``window.__NUXT__`` is available (returns it immediately), or
+        - ``timeout`` seconds elapse (returns None).
+
+        Args:
+            page_num: Page number for log messages.
+            timeout: Maximum seconds to wait before giving up.
+            interval: Seconds between each poll.
+
+        Returns:
+            Parsed ``__NUXT__`` dict, or ``None`` if timed out.
+        """
+        assert self.page is not None
+        elapsed = 0.0
+        while elapsed < timeout:
+            nuxt = await self._get_nuxt()
+            if nuxt is not None:
+                jobs = _extract_jobs(nuxt)
+                log.info(
+                    "⏱️  [page %d] __NUXT__ ready after %.0fs "
+                    "(%d jobs in state)",
+                    page_num, elapsed, len(jobs),
+                )
+                return nuxt
+            await asyncio.sleep(interval)
+            elapsed += interval
+        log.warning(
+            "⏱️  [page %d] __NUXT__ still None after %.0fs timeout",
+            page_num, timeout,
+        )
+        return None
+
     async def _load_page_with_retry(
         self,
         url: str,
@@ -929,9 +1026,10 @@ class UpworkScraperService:
                         page_num,
                     )
                     await self._hard_navigate(url)
-                    # Give Nuxt time to hydrate (12 s is safer than 8 s
-                    # for the 185 KB IIFE Upwork injects)
-                    await asyncio.sleep(12)
+                    # Poll for __NUXT__ instead of fixed sleep.
+                    # Upwork hydrates asynchronously — poll every 2 s
+                    # for up to 45 s.
+                    nuxt = await self._poll_for_nuxt(page_num, timeout=45)
 
                     html_check: str = await self.page.evaluate(
                         "document.documentElement.outerHTML"
@@ -944,7 +1042,6 @@ class UpworkScraperService:
                         self._cf_solved = False
                         # fall through to FlareSolverr path below
                     else:
-                        nuxt = await self._get_nuxt()
                         if nuxt is not None:
                             jobs = _extract_jobs(nuxt)
                             paging = _extract_paging(nuxt)
@@ -980,9 +1077,6 @@ class UpworkScraperService:
                         continue
 
                 # ── Slow path: solve Cloudflare with FlareSolverr ──────
-                log.info(
-                    "🔥 Solving Cloudflare with FlareSolverr for: %s", url
-                )
                 solution = await self._solve_cloudflare_with_flaresolverr(
                     url
                 )
@@ -998,6 +1092,18 @@ class UpworkScraperService:
                         await asyncio.sleep(backoff)
                     continue
 
+                # ── Detect Chrome network error page (broken proxy) ────
+                if _is_chrome_error_page(html):
+                    log.error(
+                        "🔌 FlareSolverr proxy BROKEN on page %d "
+                        "(attempt %d/%d) — Chrome error page received "
+                        "(%d bytes). Check PROXY_URL env var.",
+                        page_num, attempt, self.max_retries, len(html),
+                    )
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(backoff)
+                    continue
+
                 if _is_cloudflare_block(html):
                     log.error(
                         "🚫 FlareSolverr could not bypass Cloudflare "
@@ -1008,17 +1114,76 @@ class UpworkScraperService:
                         await asyncio.sleep(backoff)
                     continue
 
-                # Inject CF cookies into browser then navigate
+                # ── Diagnostics: inspect FlareSolverr HTML structure ──────
+                _nuxt_tags = re.findall(
+                    r'<script[^>]*(?:__NUXT__|__NUXT_DATA__)[^>]*>',
+                    html,
+                )
+                _has_window_nuxt = "window.__NUXT__" in html
+                # Log first 1500 chars to see what Upwork is returning
+                _html_preview = (
+                    html[:1500]
+                    .replace("\n", " ")
+                    .replace("\r", "")
+                )
+                log.info(
+                    "🔬 FlareSolverr HTML NUXT tags: %s | "
+                    "window.__NUXT__: %s | html_len: %d",
+                    _nuxt_tags[:3], _has_window_nuxt, len(html),
+                )
+                log.info(
+                    "🔬 FlareSolverr HTML preview (first 1500): %s",
+                    _html_preview,
+                )
+                # ── Try to parse __NUXT__ directly from FlareSolverr HTML ──
+                nuxt = _parse_nuxt_from_html(html)
+                if nuxt is not None:
+                    jobs = _extract_jobs(nuxt)
+                    paging = _extract_paging(nuxt)
+                    if jobs:
+                        log.info(
+                            "⚡ [page %d] Parsed __NUXT__ directly from "
+                            "FlareSolverr HTML (%d jobs)",
+                            page_num, len(jobs),
+                        )
+                        filter_total = _extract_total_from_filters(nuxt)
+                        if filter_total:
+                            paging = dict(paging)
+                            paging["filter_total"] = filter_total
+                        # Also inject cookies into browser for future
+                        # direct-nav pages (best-effort)
+                        cookies = solution.get("cookies", [])
+                        user_agent = solution.get("userAgent", "")
+                        if cookies:
+                            await self._inject_flaresolverr_cookies(
+                                cookies, user_agent
+                            )
+                            self._cf_solved = True
+                            log.info(
+                                "✅ CF cookies injected — direct nav "
+                                "enabled for subsequent pages."
+                            )
+                        return jobs, paging
+                    log.debug(
+                        "FlareSolverr HTML had __NUXT__ but 0 jobs "
+                        "on page %d — falling back to Chrome nav",
+                        page_num,
+                    )
+
+                # ── Fallback: inject cookies and navigate via Chrome ────
                 cookies = solution.get("cookies", [])
                 user_agent = solution.get("userAgent", "")
                 await self._inject_flaresolverr_cookies(
                     cookies, user_agent
                 )
                 await self._hard_navigate(url)
-                # Give Nuxt time to hydrate after cookie-based nav
-                await asyncio.sleep(12)
 
-                # Verify we got real content
+                # Poll for __NUXT__ instead of a fixed sleep.
+                # Upwork hydrates the store asynchronously — poll every
+                # 2 s for up to 45 s to catch slow hydration.
+                nuxt = await self._poll_for_nuxt(page_num, timeout=45)
+
+                # Grab HTML for diagnostics regardless of outcome
                 html_check = await self.page.evaluate(
                     "document.documentElement.outerHTML"
                 )
@@ -1032,22 +1197,28 @@ class UpworkScraperService:
                         await asyncio.sleep(backoff)
                     continue
 
+                if nuxt is None:
+                    # Log what Chrome actually received to aid debugging
+                    _chr_preview = (
+                        html_check[:2000]
+                        .replace("\n", " ")
+                        .replace("\r", "")
+                    )
+                    log.warning(
+                        "No __NUXT__ after CF solve on page %d "
+                        "(attempt %d/%d). Chrome HTML preview: %s",
+                        page_num, attempt, self.max_retries,
+                        _chr_preview,
+                    )
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(backoff)
+                    continue
+
                 self._cf_solved = True
                 log.info(
                     "✅ CF solved! Browser session active — subsequent "
                     "pages will navigate directly."
                 )
-
-                nuxt = await self._get_nuxt()
-                if nuxt is None:
-                    log.warning(
-                        "No __NUXT__ after CF solve on page %d "
-                        "(attempt %d/%d)",
-                        page_num, attempt, self.max_retries,
-                    )
-                    if attempt < self.max_retries:
-                        await asyncio.sleep(backoff)
-                    continue
 
                 jobs = _extract_jobs(nuxt)
                 paging = _extract_paging(nuxt)

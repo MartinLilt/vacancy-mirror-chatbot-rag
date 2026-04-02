@@ -1,0 +1,13 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "deploy: build+push scraper + restart flaresolverr+scraper",
+			"type": "shell",
+			"command": "set -e && echo '=== BUILD ===' && docker buildx build --platform linux/amd64 --push -t ghcr.io/martinlilt/vacancy-mirror-scraper:latest ./scraper && echo '=== UPLOAD ROTATE SCRIPT ===' && scp -i ~/.ssh/vacancy_mirror_deploy infra/deploy/rotate_webshare_proxy.sh root@178.104.110.28:/etc/vacancy-mirror/rotate_webshare_proxy.sh && echo '=== RESTART FLARESOLVERR + SCRAPER ===' && ssh -i ~/.ssh/vacancy_mirror_deploy root@178.104.110.28 \"cd /etc/vacancy-mirror && docker compose pull flaresolverr && docker compose up -d --force-recreate flaresolverr scraper && sleep 5 && docker inspect flaresolverr --format '{{range .Config.Env}}{{println .}}{{end}}' | grep PROXY\" && echo '=== DONE ==='",
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

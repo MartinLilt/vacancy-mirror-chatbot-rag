@@ -86,9 +86,12 @@ if [ "$WEEKDAY" -eq 1 ]; then
 fi
 
 # ── FlareSolverr health check ─────────────────────────────────────────
+# FLARESOLVERR_URL может быть http://flaresolverr:8191/v1 (для API)
+# Health endpoint всегда на /health (без /v1), поэтому отрезаем /v1
 FLARESOLVERR_URL="${FLARESOLVERR_URL:-http://flaresolverr:8191}"
-echo "🔍 Checking FlareSolverr at ${FLARESOLVERR_URL}/health ..."
-FS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${FLARESOLVERR_URL}/health" 2>/dev/null || echo "000")
+FLARESOLVERR_BASE="${FLARESOLVERR_URL%/v1}"
+echo "🔍 Checking FlareSolverr at ${FLARESOLVERR_BASE}/health ..."
+FS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${FLARESOLVERR_BASE}/health" 2>/dev/null || echo "000")
 if [ "$FS_STATUS" != "200" ]; then
     echo "❌ FlareSolverr is not healthy (HTTP ${FS_STATUS}) — aborting this run"
     echo "   Fix: check 'docker compose logs flaresolverr' on the server"
@@ -130,7 +133,7 @@ echo "   Profile   : ${USER_DATA_DIR}"
 echo ""
 
 # ── Run chaos scraper ─────────────────────────────────────────────────
-python -m scraper.cli scrape-chaos \
+python3 -m scraper.cli scrape-chaos \
     --max-pages-per-cat "$MAX_PAGES_PER_CAT" \
     --target-per-cat    "$TARGET_PER_CAT" \
     --delay-min         "$DELAY_MIN" \
