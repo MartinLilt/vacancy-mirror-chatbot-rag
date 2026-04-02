@@ -105,7 +105,7 @@
       "gridPos": {
         "x": 12,
         "y": 24,
-        "w": 6,
+        "w": 4,
         "h": 4
       },
       "datasource": {
@@ -129,13 +129,13 @@
       }
     },
     {
-      "id": 4,
-      "title": "Last Job Scraped At",
+      "id": 13,
+      "title": "Scrape Speed (N/jh)",
       "type": "stat",
       "gridPos": {
-        "x": 18,
+        "x": 16,
         "y": 24,
-        "w": 6,
+        "w": 8,
         "h": 4
       },
       "datasource": {
@@ -148,18 +148,30 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PCC52D03280B7034C"
           },
-          "rawSql": "SELECT EXTRACT(EPOCH FROM MAX(scraped_at))*1000 AS time FROM raw_jobs",
+          "rawSql": "WITH hourly AS ( SELECT date_trunc('hour', scraped_at) AS h, COUNT(*)::numeric AS jobs FROM raw_jobs WHERE scraped_at > NOW() - INTERVAL '24 hours' GROUP BY 1 ), agg AS ( SELECT COALESCE(SUM(jobs), 0)::numeric AS total_jobs, COALESCE(COUNT(*) FILTER (WHERE jobs > 0), 0)::numeric AS active_hours FROM hourly ) SELECT ROUND(CASE WHEN active_hours > 0 THEN total_jobs / active_hours ELSE 0 END, 1) AS speed_n_jh FROM agg",
           "format": "table",
           "refId": "A"
         }
       ],
       "options": {
-        "colorMode": "none",
-        "graphMode": "none"
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "dateTimeAsLocal"
+          "unit": "suffix:N/jh",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 50 },
+              { "color": "green", "value": 120 }
+            ]
+          }
         }
       }
     },
@@ -218,14 +230,29 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PCC52D03280B7034C"
           },
-          "rawSql": "SELECT category_uid AS category, COUNT(*) AS jobs FROM raw_jobs GROUP BY category_uid ORDER BY jobs DESC",
+          "rawSql": "SELECT CASE category_uid WHEN '531770282580668418' THEN 'WebDev' WHEN '531770282580668420' THEN 'Data' WHEN '531770282580668421' THEN 'Design' WHEN '531770282580668419' THEN 'IT' WHEN '531770282580668422' THEN 'Sales' WHEN '531770282580668416' THEN 'Admin' WHEN '531770282580668417' THEN 'Support' WHEN '531770282584862721' THEN 'Acct' WHEN '531770282584862722' THEN 'Eng' WHEN '531770282584862723' THEN 'Legal' WHEN '531770282580668423' THEN 'Writing' WHEN '531770282584862720' THEN 'Transl' ELSE RIGHT(category_uid, 6) END AS category, COUNT(*) AS jobs FROM raw_jobs GROUP BY category_uid ORDER BY jobs DESC",
           "format": "table",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "blue" }
+          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "custom": {
+            "axisPlacement": "auto",
+            "axisLabel": "Category",
+            "axisSoftMin": 0,
+            "showValue": "always"
+          }
+        }
+      },
+      "options": {
+        "xField": "category",
+        "orientation": "vertical",
+        "xTickLabelRotation": -90,
+        "xTickLabelSpacing": 0,
+        "legend": {
+          "displayMode": "hidden"
         }
       }
     },

@@ -33,9 +33,10 @@ services:
       LOG_HTML: false
       CAPTCHA_SOLVER: none
       TZ: UTC
-      # Route FlareSolverr through the same residential proxy as Chrome
-      # so Upwork/Cloudflare always sees the US residential IP, never Hetzner
-      PROXY_URL: ${PROXY_URL:-}
+      # Keep FlareSolverr proxy separate from scraper Chrome proxy.
+      # Default is direct egress (empty), because some authenticated proxies
+      # fail inside Chromium with ERR_NO_SUPPORTED_PROXIES.
+      PROXY_URL: ${FLARESOLVERR_PROXY_URL:-}
     ports:
       - "8191:8191"
 
@@ -48,7 +49,7 @@ services:
       DATABASE_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
       # Scraper API auth key (for POST /scrape and POST /jobs/clear)
       SCRAPER_API_KEY: ${SCRAPER_API_KEY}
-      # Residential proxy
+      # Residential proxy for nodriver Chrome only
       PROXY_URL: ${PROXY_URL:-}
       # Chrome session persistence
       CHROME_USER_DATA_DIR: /app/data/chrome_profile

@@ -82,6 +82,12 @@ _CF_INDICATORS: tuple[str, ...] = (
     "cf-browser-verification",
     "Enable JavaScript and cookies to continue",
     "Checking if the site connection is secure",
+    # Upwork Cloudflare Turnstile challenge (confirmed 2026-04):
+    # curl -x proxy https://upwork.com → 403 cf-mitigated:challenge
+    # title is "Challenge - Upwork", page contains these unique tokens
+    "<title>Challenge - Upwork</title>",
+    "__cf_chl_f_tk",   # CF challenge token — only on challenge pages
+    "cf_chl_opt",      # CF challenge options object — only on challenge pages
 )
 
 # Strings that indicate Upwork soft-ban / CAPTCHA / access denied
@@ -103,15 +109,36 @@ _BAN_INDICATORS: tuple[str, ...] = (
 # (ERR_TUNNEL_CONNECTION_FAILED, ERR_PROXY_CONNECTION_FAILED, etc.)
 # Returned when FlareSolverr cannot reach the target through the proxy.
 # The page is a local Chromium HTML page, NOT Upwork content.
-# Fingerprint: Chromium CSS variables (--google-blue-600, etc.).
-_CHROME_ERROR_INDICATORS: tuple[str, ...] = (
-    "--google-blue-600",          # unique to Chromium error page CSS
-    "--google-gray-700",          # same
+#
+# IMPORTANT: Do NOT use --google-blue-600 / --google-gray-700 alone as
+# indicators — Upwork's own CSS bundle imports Google Material Design
+# color tokens and these vars appear in every normal Upwork SSR page.
+# Chrome built-in error pages are always tiny (< 50 KB).  Real Upwork
+# SSR pages with embedded __NUXT__ JSON are 200–400 KB.  Use page size
+# as the primary guard when relying on CSS variable matches.
+
+# Definitive error codes — ONLY present on Chrome's built-in error pages,
+# never in real Upwork content.
+_CHROME_ERR_CODES: tuple[str, ...] = (
     "ERR_TUNNEL_CONNECTION_FAILED",
     "ERR_PROXY_CONNECTION_FAILED",
     "ERR_CONNECTION_TIMED_OUT",
     "ERR_NAME_NOT_RESOLVED",
+    "ERR_CONNECTION_REFUSED",
+    "ERR_EMPTY_RESPONSE",
 )
+
+# CSS variables that appear in Chromium's error page theme stylesheet.
+# These can also appear in real Upwork pages via Google Material imports,
+# so they are only reliable on SMALL pages (< 50 KB).
+_CHROME_ERR_CSS_VARS: tuple[str, ...] = (
+    "--google-blue-600",
+    "--google-gray-700",
+)
+
+# Size threshold: Chrome error pages are always tiny.
+# Real Upwork SSR pages are 150–400 KB.
+_CHROME_ERROR_PAGE_MAX_BYTES = 50_000
 
 
 def _is_chrome_error_page(html: str) -> bool:
@@ -119,18 +146,39 @@ def _is_chrome_error_page(html: str) -> bool:
 
     This happens when FlareSolverr's proxy is broken — Chrome cannot
     reach the target URL and renders a local error page instead.
-    The page looks like real HTML (246 KB) but has no Upwork content.
+
+    Detection rules (in priority order):
+    1. Explicit ERR_* error code present → definitive error page.
+    2. CSS vars match AND page is small (< 50 KB) → likely error page.
+       (Large pages with these vars are legitimate Upwork content.)
+    3. Title is the target domain but no upwork content → stub page.
     """
-    # Chromium error pages always contain their CSS vars (≥2 matches)
-    matches = sum(1 for s in _CHROME_ERROR_INDICATORS if s in html)
-    if matches >= 2:
-        return True
-    # Secondary: title is the target domain but no upwork JS present
+    # Rule 1: explicit network error code — definitive, size-independent
+    for code in _CHROME_ERR_CODES:
+        if code in html:
+            log.debug("🔍 Chrome error page detected: ERR code %r found", code)
+            return True
+
+    # Rule 2: CSS vars are only reliable on small pages
+    # Upwork's 200–400 KB SSR pages also contain these vars → false positives
+    if len(html) < _CHROME_ERROR_PAGE_MAX_BYTES:
+        css_matches = sum(1 for v in _CHROME_ERR_CSS_VARS if v in html)
+        if css_matches >= 2:
+            log.debug(
+                "🔍 Chrome error page detected: CSS vars on small page "
+                "(%d bytes, %d var matches)",
+                len(html), css_matches,
+            )
+            return True
+
+    # Rule 3: title is the domain name but the body has no Upwork content
     if (
         "<title>www.upwork.com</title>" in html
         and "upwork" not in html[1000:5000].lower()
     ):
+        log.debug("🔍 Chrome error page detected: title/content mismatch")
         return True
+
     return False
 
 
@@ -414,10 +462,6 @@ class UpworkScraperService:
             "FLARESOLVERR_URL", "http://localhost:8191/v1"
         )
         self.flaresolverr = FlareSolverrClient(api_url=flaresolverr_url)
-        # True once Cloudflare cookies are injected into the browser.
-        # While True we navigate directly (no FlareSolverr) — much faster.
-        # Reset to False if Cloudflare challenge re-appears.
-        self._cf_solved = False
 
     def _random_delay(self) -> float:
         """Return a uniformly sampled delay from [min, max].
@@ -989,20 +1033,19 @@ class UpworkScraperService:
         url: str,
         page_num: int,
     ) -> tuple[list[dict[str, Any]] | None, dict[str, int]]:
-        """Load a single Upwork search page and extract jobs + paging info.
+        """Load a single Upwork search page via FlareSolverr and extract jobs.
 
-        Strategy (fast-path first):
-        1. If Cloudflare was already solved in this session
-           (``_cf_solved=True``), navigate directly with ``page.get(url)``
-           — no FlareSolverr call needed.  Each page takes ~5-10 s instead
-           of ~60 s.
-        2. If we get a Cloudflare challenge back (detected via
-           ``_is_cloudflare_block``), reset ``_cf_solved=False`` and fall
-           through to step 3.
-        3. Call FlareSolverr to solve Cloudflare, inject the returned
-           cookies into the nodriver browser, then navigate to the URL.
-           After success set ``_cf_solved=True`` so all subsequent pages
-           skip FlareSolverr.
+        Strategy:
+        1. FlareSolverr fetches the page through the residential proxy,
+           solving the Cloudflare challenge if needed.
+        2. The returned HTML is written into the nodriver Chrome tab via
+           ``document.write()`` so that inline ``<script>`` tags execute
+           and ``window.__NUXT__`` becomes available.
+        3. ``_get_nuxt()`` reads ``window.__NUXT__`` from the live DOM.
+
+        Chrome never navigates to Upwork directly — it only executes the
+        HTML that FlareSolverr already fetched.  This avoids Cloudflare
+        detecting the headless browser.
 
         Args:
             url: Full Upwork search URL.
@@ -1010,8 +1053,6 @@ class UpworkScraperService:
 
         Returns:
             Tuple of (jobs list or None on failure, paging dict).
-            paging dict contains keys like ``total``, ``count``,
-            ``offset`` from window.__NUXT__.state.jobsSearch.paging.
         """
         assert self.page is not None
 
@@ -1019,67 +1060,8 @@ class UpworkScraperService:
             backoff = self.retry_delay * (3 ** (attempt - 1))
 
             try:
-                # ── Fast path: browser already has CF cookies ──────────
-                if self._cf_solved:
-                    log.info(
-                        "⚡ [page %d] Direct navigation (CF already solved)",
-                        page_num,
-                    )
-                    await self._hard_navigate(url)
-                    # Poll for __NUXT__ instead of fixed sleep.
-                    # Upwork hydrates asynchronously — poll every 2 s
-                    # for up to 45 s.
-                    nuxt = await self._poll_for_nuxt(page_num, timeout=45)
-
-                    html_check: str = await self.page.evaluate(
-                        "document.documentElement.outerHTML"
-                    )
-                    if _is_cloudflare_block(html_check):
-                        log.warning(
-                            "☁️  Cloudflare re-appeared on page %d — "
-                            "re-solving via FlareSolverr …", page_num,
-                        )
-                        self._cf_solved = False
-                        # fall through to FlareSolverr path below
-                    else:
-                        if nuxt is not None:
-                            jobs = _extract_jobs(nuxt)
-                            paging = _extract_paging(nuxt)
-                            # Try to get real total from experience filters
-                            filter_total = _extract_total_from_filters(nuxt)
-                            if filter_total:
-                                paging = dict(paging)
-                                paging["filter_total"] = filter_total
-                                log.info(
-                                    "🔢 [page %d] filter_total=%d "
-                                    "(paging.total=%d)",
-                                    page_num, filter_total,
-                                    paging.get("total", 0),
-                                )
-                            else:
-                                # Log NUXT keys once to help debug
-                                jobs_search = nuxt.get("state", {}).get(
-                                    "jobsSearch", {}
-                                )
-                                log.debug(
-                                    "jobsSearch keys: %s",
-                                    list(jobs_search.keys()),
-                                )
-                            return jobs, paging
-                        # __NUXT__ missing despite good HTML — retry
-                        log.warning(
-                            "No __NUXT__ on direct-nav page %d "
-                            "(attempt %d/%d)",
-                            page_num, attempt, self.max_retries,
-                        )
-                        if attempt < self.max_retries:
-                            await asyncio.sleep(backoff)
-                        continue
-
-                # ── Slow path: solve Cloudflare with FlareSolverr ──────
-                solution = await self._solve_cloudflare_with_flaresolverr(
-                    url
-                )
+                # ── Step 1: FlareSolverr fetches + solves CF ───────────
+                solution = await self._solve_cloudflare_with_flaresolverr(url)
                 html = solution.get("html", "")
 
                 if not html:
@@ -1094,16 +1076,19 @@ class UpworkScraperService:
 
                 # ── Detect Chrome network error page (broken proxy) ────
                 if _is_chrome_error_page(html):
+                    # Log first 300 chars of HTML to help diagnose
                     log.error(
                         "🔌 FlareSolverr proxy BROKEN on page %d "
-                        "(attempt %d/%d) — Chrome error page received "
-                        "(%d bytes). Check PROXY_URL env var.",
+                        "(attempt %d/%d) — Chrome error page (%d bytes). "
+                        "HTML preview: %.300s",
                         page_num, attempt, self.max_retries, len(html),
+                        html[:300].replace("\n", " "),
                     )
                     if attempt < self.max_retries:
                         await asyncio.sleep(backoff)
                     continue
 
+                # ── Detect Cloudflare / ban page ───────────────────────
                 if _is_cloudflare_block(html):
                     log.error(
                         "🚫 FlareSolverr could not bypass Cloudflare "
@@ -1114,115 +1099,47 @@ class UpworkScraperService:
                         await asyncio.sleep(backoff)
                     continue
 
-                # ── Diagnostics: inspect FlareSolverr HTML structure ──────
-                _nuxt_tags = re.findall(
-                    r'<script[^>]*(?:__NUXT__|__NUXT_DATA__)[^>]*>',
-                    html,
-                )
-                _has_window_nuxt = "window.__NUXT__" in html
-                # Log first 1500 chars to see what Upwork is returning
-                _html_preview = (
-                    html[:1500]
-                    .replace("\n", " ")
-                    .replace("\r", "")
-                )
                 log.info(
-                    "🔬 FlareSolverr HTML NUXT tags: %s | "
-                    "window.__NUXT__: %s | html_len: %d",
-                    _nuxt_tags[:3], _has_window_nuxt, len(html),
+                    "� [page %d] FlareSolverr HTML: %d bytes, cookies: %d",
+                    page_num, len(html), len(solution.get("cookies", [])),
                 )
-                log.info(
-                    "🔬 FlareSolverr HTML preview (first 1500): %s",
-                    _html_preview,
-                )
-                # ── Try to parse __NUXT__ directly from FlareSolverr HTML ──
-                nuxt = _parse_nuxt_from_html(html)
-                if nuxt is not None:
-                    jobs = _extract_jobs(nuxt)
-                    paging = _extract_paging(nuxt)
-                    if jobs:
-                        log.info(
-                            "⚡ [page %d] Parsed __NUXT__ directly from "
-                            "FlareSolverr HTML (%d jobs)",
-                            page_num, len(jobs),
-                        )
-                        filter_total = _extract_total_from_filters(nuxt)
-                        if filter_total:
-                            paging = dict(paging)
-                            paging["filter_total"] = filter_total
-                        # Also inject cookies into browser for future
-                        # direct-nav pages (best-effort)
-                        cookies = solution.get("cookies", [])
-                        user_agent = solution.get("userAgent", "")
-                        if cookies:
-                            await self._inject_flaresolverr_cookies(
-                                cookies, user_agent
-                            )
-                            self._cf_solved = True
-                            log.info(
-                                "✅ CF cookies injected — direct nav "
-                                "enabled for subsequent pages."
-                            )
-                        return jobs, paging
-                    log.debug(
-                        "FlareSolverr HTML had __NUXT__ but 0 jobs "
-                        "on page %d — falling back to Chrome nav",
-                        page_num,
-                    )
 
-                # ── Fallback: inject cookies and navigate via Chrome ────
-                cookies = solution.get("cookies", [])
-                user_agent = solution.get("userAgent", "")
-                await self._inject_flaresolverr_cookies(
-                    cookies, user_agent
+                # ── Step 2: write HTML into Chrome so scripts execute ──
+                await self.page.evaluate(
+                    f"document.open(); "
+                    f"document.write({json.dumps(html)}); "
+                    f"document.close();"
                 )
-                await self._hard_navigate(url)
+                await asyncio.sleep(2)  # let inline scripts run
 
-                # Poll for __NUXT__ instead of a fixed sleep.
-                # Upwork hydrates the store asynchronously — poll every
-                # 2 s for up to 45 s to catch slow hydration.
-                nuxt = await self._poll_for_nuxt(page_num, timeout=45)
-
-                # Grab HTML for diagnostics regardless of outcome
-                html_check = await self.page.evaluate(
-                    "document.documentElement.outerHTML"
-                )
-                if _is_cloudflare_block(html_check):
-                    log.error(
-                        "🚫 Cloudflare still blocking after cookie inject "
-                        "on page %d (attempt %d/%d)",
-                        page_num, attempt, self.max_retries,
-                    )
-                    if attempt < self.max_retries:
-                        await asyncio.sleep(backoff)
-                    continue
+                # ── Step 3: extract window.__NUXT__ ───────────────────
+                nuxt = await self._get_nuxt()
 
                 if nuxt is None:
-                    # Log what Chrome actually received to aid debugging
-                    _chr_preview = (
-                        html_check[:2000]
-                        .replace("\n", " ")
-                        .replace("\r", "")
-                    )
-                    log.warning(
-                        "No __NUXT__ after CF solve on page %d "
-                        "(attempt %d/%d). Chrome HTML preview: %s",
-                        page_num, attempt, self.max_retries,
-                        _chr_preview,
-                    )
-                    if attempt < self.max_retries:
-                        await asyncio.sleep(backoff)
-                    continue
-
-                self._cf_solved = True
-                log.info(
-                    "✅ CF solved! Browser session active — subsequent "
-                    "pages will navigate directly."
-                )
+                    # Try parsing directly from raw HTML as fallback
+                    nuxt_from_html = _parse_nuxt_from_html(html)
+                    if nuxt_from_html is not None:
+                        log.info(
+                            "⚠️  [page %d] __NUXT__ not in browser JS, "
+                            "but found in raw HTML — using HTML parse",
+                            page_num,
+                        )
+                        nuxt = nuxt_from_html
+                    else:
+                        log.warning(
+                            "No __NUXT__ after document.write on page %d "
+                            "(attempt %d/%d). "
+                            "HTML preview: %.300s",
+                            page_num, attempt, self.max_retries,
+                            html[:300].replace("\n", " "),
+                        )
+                        if attempt < self.max_retries:
+                            await asyncio.sleep(backoff)
+                        continue
 
                 jobs = _extract_jobs(nuxt)
                 paging = _extract_paging(nuxt)
-                # Try to get real total from experience filters
+
                 filter_total = _extract_total_from_filters(nuxt)
                 if filter_total:
                     paging = dict(paging)
@@ -1231,13 +1148,7 @@ class UpworkScraperService:
                         "🔢 [page %d] filter_total=%d (paging.total=%d)",
                         page_num, filter_total, paging.get("total", 0),
                     )
-                else:
-                    jobs_search = nuxt.get("state", {}).get(
-                        "jobsSearch", {}
-                    )
-                    log.debug(
-                        "jobsSearch keys: %s", list(jobs_search.keys())
-                    )
+
                 return jobs, paging
 
             except Exception as e:

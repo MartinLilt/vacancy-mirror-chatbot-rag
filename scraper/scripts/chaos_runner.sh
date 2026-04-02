@@ -9,6 +9,11 @@
 # 4. Stops after MAX_RUNTIME_MINUTES or at 22:00, whichever is first
 # 5. Monday → reset state (fresh week)
 
+# Ensure we use the python3 from the Docker base image (python:3.13-slim),
+# not the system python3 pulled in by 'apt-get install chromium'.
+# Cron runs with a minimal PATH (/usr/bin first), so we must be explicit.
+export PATH=/usr/local/bin:$PATH
+
 set -e
 
 # ── Config ────────────────────────────────────────────────────────────
