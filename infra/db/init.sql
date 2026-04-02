@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS raw_jobs (
     scrape_run_id BIGINT REFERENCES scrape_runs (id) ON DELETE SET NULL,
     category_uid TEXT NOT NULL,
     category_name TEXT NOT NULL,
-    job_uid TEXT NOT NULL,
+    job_uid TEXT NOT NULL,       -- numeric uid (preferred) or ciphertext
+    ciphertext TEXT,             -- Upwork ~0abc... identifier (raw, unmodified)
     title TEXT NOT NULL,
     description TEXT,
     published_at TIMESTAMPTZ,

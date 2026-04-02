@@ -68,13 +68,17 @@ PER_PAGE = 50
 # Upwork only serves up to page 100 (5 000 jobs per category)
 MAX_ALLOWED_PAGE = 100
 
-# Strings that indicate Cloudflare challenge page
+# Strings that indicate Cloudflare challenge page.
+# IMPORTANT: must be unique to the challenge page, NOT present in normal
+# Upwork HTML. "cf_clearance" and "Just a moment" appear in normal pages
+# so they must NOT be listed here.
 _CF_INDICATORS: tuple[str, ...] = (
     "challenges.cloudflare.com",
     "cf-browser-verification",
-    "cf_clearance",
-    "Just a moment",
     "Enable JavaScript and cookies to continue",
+    "Checking if the site connection is secure",
+    "ray-id",
+    "/cdn-cgi/challenge-platform",
 )
 
 # Strings that indicate Upwork soft-ban / CAPTCHA / access denied
@@ -141,12 +145,19 @@ def _extract_paging(nuxt: dict[str, Any]) -> dict[str, int]:
     )
 
 
-def _is_cloudflare_block(html: str) -> bool:
+def _is_cloudflare_block(html: str, *, _log_trigger: bool = True) -> bool:
     """Return True if the page looks like a Cloudflare challenge or ban."""
-    return (
-        any(indicator in html for indicator in _CF_INDICATORS)
-        or any(indicator in html for indicator in _BAN_INDICATORS)
-    )
+    for indicator in _CF_INDICATORS:
+        if indicator in html:
+            if _log_trigger:
+                log.debug("🔍 CF indicator matched: %r", indicator)
+            return True
+    for indicator in _BAN_INDICATORS:
+        if indicator in html:
+            if _log_trigger:
+                log.debug("🔍 BAN indicator matched: %r", indicator)
+            return True
+    return False
 
 
 class ScraperError(Exception):
@@ -482,19 +493,50 @@ class UpworkScraperService:
         Returns:
             List of job dicts from this page.
         """
+        jobs, _ = await self.scrape_page_with_paging(
+            category_uid, page, extra_params=extra_params
+        )
+        return jobs
+
+    async def scrape_page_with_paging(
+        self,
+        category_uid: str,
+        page: int,
+        *,
+        extra_params: dict[str, str] | None = None,
+    ) -> tuple[list[dict[str, Any]] | None, dict[str, int]]:
+        """Scrape a single page and return (jobs, paging_info).
+
+        ``paging_info`` is the raw ``paging`` dict from __NUXT__:
+        ``{"total": 2543, "count": 50, "offset": 150, ...}``
+
+        Use ``paging["total"]`` to know the real total job count for the
+        category, which lets the caller compute the actual max page number:
+        ``max_page = min(100, math.ceil(paging["total"] / 50))``.
+
+        Args:
+            category_uid: Upwork category UID.
+            page: Page number (1-based).
+            extra_params: Optional extra query parameters.
+
+        Returns:
+            Tuple of (jobs list or None, paging dict).
+            Returns (None, {}) when all retries failed (load error).
+            Returns ([], paging) when page loaded but had 0 jobs
+            (genuine empty page / beyond category limit).
+            paging is empty dict if paging data was unavailable.
+        """
         url = _build_url(category_uid, page, extra_params)
-        jobs = await self._load_page_with_retry(url, page)
+        jobs, paging = await self._load_page_with_retry_and_paging(
+            url, page
+        )
 
         if jobs is None:
             log.error(f"Failed to load page {page}")
-            return []
+            return None, {}
 
         log.info(f"Page {page}: fetched {len(jobs)} jobs")
-        return jobs
-
-    # ------------------------------------------------------------------
-    # Checkpoint helpers
-    # ------------------------------------------------------------------
+        return jobs, paging
 
     def _checkpoint_path(
         self, category_uid: str, page_num: int
@@ -699,7 +741,16 @@ class UpworkScraperService:
         url: str,
         page_num: int,
     ) -> list[dict[str, Any]] | None:
-        """Load a single Upwork search page and extract jobs.
+        """Load page and return jobs only (backward-compat wrapper)."""
+        jobs, _ = await self._load_page_with_retry_and_paging(url, page_num)
+        return jobs
+
+    async def _load_page_with_retry_and_paging(
+        self,
+        url: str,
+        page_num: int,
+    ) -> tuple[list[dict[str, Any]] | None, dict[str, int]]:
+        """Load a single Upwork search page and extract jobs + paging info.
 
         Strategy (fast-path first):
         1. If Cloudflare was already solved in this session
@@ -719,7 +770,9 @@ class UpworkScraperService:
             page_num: Page number (for logging).
 
         Returns:
-            List of job dicts, or None if all retries failed.
+            Tuple of (jobs list or None on failure, paging dict).
+            paging dict contains keys like ``total``, ``count``,
+            ``offset`` from window.__NUXT__.state.jobsSearch.paging.
         """
         assert self.page is not None
 
@@ -734,9 +787,9 @@ class UpworkScraperService:
                         page_num,
                     )
                     await self.page.get(url)
-                    # Give Nuxt time to hydrate (8 s is safer than 5 s
+                    # Give Nuxt time to hydrate (12 s is safer than 8 s
                     # for the 185 KB IIFE Upwork injects)
-                    await asyncio.sleep(8)
+                    await asyncio.sleep(12)
 
                     html_check: str = await self.page.evaluate(
                         "document.documentElement.outerHTML"
@@ -752,7 +805,8 @@ class UpworkScraperService:
                         nuxt = await self._get_nuxt()
                         if nuxt is not None:
                             jobs = _extract_jobs(nuxt)
-                            return jobs
+                            paging = _extract_paging(nuxt)
+                            return jobs, paging
                         # __NUXT__ missing despite good HTML — retry
                         log.warning(
                             "No __NUXT__ on direct-nav page %d "
@@ -800,7 +854,7 @@ class UpworkScraperService:
                 )
                 await self.page.get(url)
                 # Give Nuxt time to hydrate after cookie-based nav
-                await asyncio.sleep(8)
+                await asyncio.sleep(12)
 
                 # Verify we got real content
                 html_check = await self.page.evaluate(
@@ -834,7 +888,8 @@ class UpworkScraperService:
                     continue
 
                 jobs = _extract_jobs(nuxt)
-                return jobs
+                paging = _extract_paging(nuxt)
+                return jobs, paging
 
             except Exception as e:
                 log.error(
@@ -848,7 +903,7 @@ class UpworkScraperService:
         log.error(
             "Page %d failed after %d attempts.", page_num, self.max_retries
         )
-        return None
+        return None, {}
 
     # ------------------------------------------------------------------
     # Public scraping API

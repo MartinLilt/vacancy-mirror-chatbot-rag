@@ -57,6 +57,9 @@ def _extract_row(
     job_uid = job.get("uid") or job.get("ciphertext")
     if not job_uid:
         return None
+    # Store ciphertext separately so both IDs are preserved.
+    # job_uid prefers numeric uid (more stable); ciphertext is ~0abc...
+    ciphertext: str | None = job.get("ciphertext") or None
 
     title: str = job.get("title", "")
     description: str | None = job.get("description")
@@ -106,6 +109,7 @@ def _extract_row(
         category_uid,
         category_name,
         str(job_uid),
+        ciphertext,
         title,
         description,
         published_at,
@@ -248,41 +252,81 @@ class ScraperPostgresService:
     # Raw job insertion
     # ------------------------------------------------------------------
 
+    def fetch_known_uids(self, category_uid: str) -> set[str]:
+        """Return all job_uid values already stored for a category.
+
+        Used to pre-filter duplicates in memory before attempting
+        an INSERT, so the caller can count truly new jobs without
+        waiting for ON CONFLICT to tell us after the fact.
+
+        Args:
+            category_uid: The Upwork category2_uid to query.
+
+        Returns:
+            Set of job_uid strings already in ``raw_jobs``.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT job_uid FROM raw_jobs WHERE category_uid = %s",
+                (category_uid,),
+            )
+            return {row[0] for row in cur.fetchall()}
+
     def insert_raw_jobs(
         self,
         jobs: list[dict[str, Any]],
         scrape_run_id: int,
         category_uid: str,
         category_name: str,
-    ) -> int:
+        known_uids: set[str] | None = None,
+    ) -> tuple[int, int]:
         """Bulk-insert raw job dicts into the ``raw_jobs`` table.
 
         Skips jobs whose ``job_uid`` already exists for this category
         (``ON CONFLICT (category_uid, job_uid) DO NOTHING``).
+
+        If ``known_uids`` is provided (a set pre-loaded via
+        ``fetch_known_uids``), duplicates are filtered in Python
+        before the INSERT so the caller knows the new count
+        immediately without relying on rowcount heuristics.
 
         Args:
             jobs: List of raw job dicts from the scraper.
             scrape_run_id: The associated scrape_run id.
             category_uid: The category2_uid these jobs belong to.
             category_name: Human-readable category name.
+            known_uids: Optional set of already-stored job_uids for
+                this category.  Updated in-place with newly inserted
+                uids so it stays current across multiple calls.
 
         Returns:
-            Number of rows actually inserted (duplicates excluded).
+            Tuple of (inserted_count, duplicate_count).
         """
         if not jobs:
-            return 0
+            return 0, 0
 
         rows: list[tuple[Any, ...]] = []
+        pre_dups = 0
         for job in jobs:
             row = _extract_row(
                 job, scrape_run_id, category_uid, category_name
             )
-            if row is not None:
-                rows.append(row)
+            if row is None:
+                continue
+            # row[3] is job_uid (index matches _extract_row tuple order)
+            job_uid_val: str = row[3]
+            if known_uids is not None and job_uid_val in known_uids:
+                pre_dups += 1
+                continue
+            rows.append(row)
 
         if not rows:
-            log.warning("No extractable rows from %d jobs.", len(jobs))
-            return 0
+            log.info(
+                "All %d jobs pre-filtered as duplicates "
+                "(category=%s).",
+                len(jobs), category_uid,
+            )
+            return 0, len(jobs)
 
         with self.conn.cursor() as cur:
             execute_values(
@@ -293,6 +337,7 @@ class ScraperPostgresService:
                     category_uid,
                     category_name,
                     job_uid,
+                    ciphertext,
                     title,
                     description,
                     published_at,
@@ -315,12 +360,21 @@ class ScraperPostgresService:
             )
             inserted: int = cur.rowcount
         self.conn.commit()
+
+        # Update the in-memory set with newly inserted uids
+        if known_uids is not None:
+            for row in rows:
+                known_uids.add(row[3])
+
+        total_dups = pre_dups + (len(rows) - inserted)
         log.info(
-            "Inserted %d/%d raw jobs "
+            "Inserted %d/%d raw jobs — %d pre-filtered + %d DB dups "
             "(category=%s, run=%d).",
             inserted,
-            len(rows),
+            len(jobs),
+            pre_dups,
+            len(rows) - inserted,
             category_uid,
             scrape_run_id,
         )
-        return inserted
+        return inserted, total_dups

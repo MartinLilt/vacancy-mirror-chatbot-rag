@@ -436,13 +436,17 @@ def _run_scraper_chaos() -> None:
         "python", "-m", "scraper.cli", "scrape-chaos",
         "--max-runtime-minutes", "50",
         "--stop-at-hour", "24",
+        "--target-per-cat", str(CHAOS_TARGET_PER_CAT),
     ]
 
     _push_log(f"{'='*60}")
     _push_log(
         f"▶ CHAOS SESSION  "
         f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    _push_log("  Mode: all categories, target 100 jobs each")
+    _push_log(
+        f"  Mode: all categories, "
+        f"target {CHAOS_TARGET_PER_CAT} jobs each"
+    )
     _push_log(f"{'='*60}")
 
     try:
@@ -496,7 +500,7 @@ _UID_TO_NAME: dict[str, str] = {v: k for k, v in CATEGORY_UIDS.items()}
 
 CHAOS_STATE_PATH = Path(os.environ.get(
     "CHAOS_STATE_FILE", "/app/data/chaos_state.json"))
-CHAOS_TARGET_PER_CAT = int(os.environ.get("CHAOS_TARGET_PER_CAT", "100"))
+CHAOS_TARGET_PER_CAT = int(os.environ.get("CHAOS_TARGET_PER_CAT", "1000"))
 
 
 @app.get("/chaos-state")
@@ -505,7 +509,7 @@ def chaos_state() -> dict:
 
     Response shape:
     {
-      "target_per_cat": 100,
+      "target_per_cat": 1000,
       "state_file": "/app/data/chaos_state.json",
       "categories": [
         {
