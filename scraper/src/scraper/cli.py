@@ -26,7 +26,7 @@ import logging
 import math
 import sys
 
-from scraper.categories import CATEGORY_UIDS
+from scraper.categories import CATEGORY_UIDS, CATEGORY_TOTAL_JOBS
 from scraper.services.postgres import ScraperPostgresService
 from scraper.services.upwork_scraper import (
     CategoryScraperService,
@@ -770,6 +770,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
     def apply_paging_totals(
         cat_state: dict,
         cat_name: str,
+        cat_uid: str,
         paging: dict[str, int],
         *,
         source: str,
@@ -797,16 +798,20 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                     source,
                 )
         elif paging_total > 0:
-            # Single-page paging.total can be context-sensitive; only raise.
-            real_max = min(100, math.ceil(paging_total / PER_PAGE))
+            # Single-page paging.total can be context-sensitive.
+            # Protect against obvious undercounts by flooring to known baseline.
+            known_total = CATEGORY_TOTAL_JOBS.get(cat_uid, 0)
+            safe_total = max(paging_total, known_total)
+            real_max = min(100, math.ceil(safe_total / PER_PAGE))
             if real_max > existing_real_max:
                 cat_state["real_max_page"] = real_max
-                cat_state["total_upwork_jobs"] = paging_total
+                cat_state["total_upwork_jobs"] = safe_total
                 log.info(
-                    "   📏 [%s] real_max_page=%d (paging_total=%d, raised, %s)",
+                    "   📏 [%s] real_max_page=%d (paging_total=%d, baseline=%d, raised, %s)",
                     cat_name,
                     real_max,
                     paging_total,
+                    known_total,
                     source,
                 )
 
@@ -911,6 +916,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
             apply_paging_totals(
                 cat_state,
                 cat_name,
+                cat_uid,
                 pre_paging,
                 source="session prepass",
             )
@@ -1073,6 +1079,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                         apply_paging_totals(
                             cat_state,
                             cat_name,
+                            cat_uid,
                             pre_paging,
                             source="pre-step",
                         )
@@ -1143,6 +1150,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                         apply_paging_totals(
                             cat_state,
                             cat_name,
+                            cat_uid,
                             paging,
                             source=f"page {page_num}",
                         )
@@ -1155,20 +1163,11 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                                 "real_max_page", 0
                             )
                             log.info(
-                                "   ⚪ [%s] page %d empty — "
-                                "Upwork limit (real_max=%s)",
+                                "   ⚪ [%s] page %d empty (real_max=%s) — "
+                                "not marking future pages as exhausted",
                                 cat_name, page_num,
                                 cur_real_max or "unknown",
                             )
-                            mark_up_to = cur_real_max or max_possible
-                            visited_set = set(cat_state["visited_pages"])
-                            for future_p in range(
-                                page_num, mark_up_to + 1
-                            ):
-                                if future_p not in visited_set:
-                                    cat_state["visited_pages"].append(
-                                        future_p
-                                    )
                             save_state(state)
                             break
 

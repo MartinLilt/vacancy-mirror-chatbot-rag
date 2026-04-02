@@ -183,7 +183,7 @@
         "x": 0,
         "y": 28,
         "w": 12,
-        "h": 8
+        "h": 16
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -230,7 +230,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PCC52D03280B7034C"
           },
-          "rawSql": "SELECT COALESCE(NULLIF(category_name, ''), CASE category_uid WHEN '531770282580668418' THEN 'WebDev' WHEN '531770282580668420' THEN 'Data' WHEN '531770282580668421' THEN 'Design' WHEN '531770282580668419' THEN 'IT' WHEN '531770282580668422' THEN 'Sales' WHEN '531770282580668416' THEN 'Admin' WHEN '531770282580668417' THEN 'Support' WHEN '531770282584862721' THEN 'Acct' WHEN '531770282584862722' THEN 'Eng' WHEN '531770282584862723' THEN 'Legal' WHEN '531770282580668423' THEN 'Writing' WHEN '531770282584862720' THEN 'Transl' ELSE RIGHT(category_uid, 6) END) AS category, COUNT(*) AS jobs FROM raw_jobs GROUP BY 1 ORDER BY jobs DESC",
+          "rawSql": "WITH categories AS ( SELECT DISTINCT category_uid, category_name FROM scrape_runs ), counts AS ( SELECT category_uid, COUNT(*) AS jobs FROM raw_jobs GROUP BY category_uid ) SELECT CASE categories.category_name WHEN 'Web, Mobile & Software Dev' THEN 'WebDev' WHEN 'Data Science & Analytics' THEN 'Data' WHEN 'Design & Creative' THEN 'Design' WHEN 'IT & Networking' THEN 'IT' WHEN 'Sales & Marketing' THEN 'Sales' WHEN 'Admin Support' THEN 'Admin' WHEN 'Customer Service' THEN 'Support' WHEN 'Accounting & Consulting' THEN 'Acct' WHEN 'Engineering & Architecture' THEN 'Eng' WHEN 'Legal' THEN 'Legal' WHEN 'Writing' THEN 'Writing' WHEN 'Translation' THEN 'Transl' ELSE categories.category_name END AS category, COALESCE(counts.jobs, 0) AS jobs FROM categories LEFT JOIN counts ON counts.category_uid = categories.category_uid ORDER BY jobs DESC",
           "format": "table",
           "refId": "A"
         }
@@ -277,7 +277,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 54,
+        "y": 58,
         "w": 12,
         "h": 8
       },
@@ -314,7 +314,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 54,
+        "y": 58,
         "w": 12,
         "h": 8
       },
@@ -351,7 +351,7 @@
       "type": "stat",
       "gridPos": {
         "x": 0,
-        "y": 62,
+        "y": 66,
         "w": 8,
         "h": 4
       },
@@ -381,7 +381,7 @@
       "type": "stat",
       "gridPos": {
         "x": 8,
-        "y": 62,
+        "y": 66,
         "w": 8,
         "h": 4
       },
@@ -416,7 +416,7 @@
       "type": "stat",
       "gridPos": {
         "x": 16,
-        "y": 62,
+        "y": 66,
         "w": 8,
         "h": 4
       },

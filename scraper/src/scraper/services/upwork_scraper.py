@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -265,22 +266,100 @@ def _parse_nuxt_from_html(html: str) -> dict[str, Any] | None:
 
 def _extract_jobs(nuxt: dict[str, Any]) -> list[dict[str, Any]]:
     """Pull the jobs list out of the window.__NUXT__ payload."""
-    return (
+    direct = (
         nuxt
         .get("state", {})
         .get("jobsSearch", {})
         .get("jobs", [])
     )
+    if isinstance(direct, list) and direct:
+        return direct
+
+    # Fallback for payload shape drift: find a list of job-like dicts anywhere.
+    found = _find_jobs_anywhere(nuxt)
+    return found or []
 
 
 def _extract_paging(nuxt: dict[str, Any]) -> dict[str, int]:
     """Pull paging metadata out of the window.__NUXT__ payload."""
-    return (
+    direct = (
         nuxt
         .get("state", {})
         .get("jobsSearch", {})
         .get("paging", {})
     )
+    if isinstance(direct, dict) and direct:
+        return direct
+
+    # Fallback for payload shape drift (Nuxt variants / nested stores).
+    return _find_paging_anywhere(nuxt) or {}
+
+
+def _is_job_like(item: Any) -> bool:
+    """Heuristic check for Upwork job-card objects."""
+    if not isinstance(item, dict):
+        return False
+    has_uid = bool(item.get("uid") or item.get("ciphertext"))
+    has_job_fields = any(
+        k in item for k in ("title", "description", "publishedOn", "client")
+    )
+    return has_uid and has_job_fields
+
+
+def _find_jobs_anywhere(node: Any, *, _depth: int = 0) -> list[dict[str, Any]] | None:
+    """Recursively find the first list of job-like dicts in a payload."""
+    if _depth > 12:
+        return None
+
+    if isinstance(node, list) and node:
+        if any(_is_job_like(x) for x in node):
+            return [x for x in node if isinstance(x, dict)]
+        for item in node:
+            found = _find_jobs_anywhere(item, _depth=_depth + 1)
+            if found:
+                return found
+        return None
+
+    if isinstance(node, dict):
+        # Try likely keys first for speed.
+        for key in ("jobs", "results", "searchResults", "items", "list"):
+            if key in node:
+                found = _find_jobs_anywhere(node.get(key), _depth=_depth + 1)
+                if found:
+                    return found
+        for value in node.values():
+            found = _find_jobs_anywhere(value, _depth=_depth + 1)
+            if found:
+                return found
+    return None
+
+
+def _find_paging_anywhere(node: Any, *, _depth: int = 0) -> dict[str, int] | None:
+    """Recursively find paging dict ({total,count,offset,...}) in payload."""
+    if _depth > 12:
+        return None
+
+    if isinstance(node, dict):
+        total = node.get("total")
+        if isinstance(total, int) and any(k in node for k in ("count", "offset", "per_page", "perPage")):
+            return node
+        for key in ("paging", "pagination", "pageInfo"):
+            if key in node:
+                found = _find_paging_anywhere(node.get(key), _depth=_depth + 1)
+                if found:
+                    return found
+        for value in node.values():
+            found = _find_paging_anywhere(value, _depth=_depth + 1)
+            if found:
+                return found
+        return None
+
+    if isinstance(node, list):
+        for item in node:
+            found = _find_paging_anywhere(item, _depth=_depth + 1)
+            if found:
+                return found
+    return None
 
 
 def _extract_total_from_filters(nuxt: dict[str, Any]) -> int | None:
@@ -307,7 +386,7 @@ def _extract_total_from_filters(nuxt: dict[str, Any]) -> int | None:
         ]
         log.info("🔬 jobsFilters.filters groups: %s",
                  _json.dumps(groups_preview, ensure_ascii=False))
-        total = _sum_tier_buckets(filters)
+        total = _sum_experience_buckets(filters)
         if total:
             return total
 
@@ -318,7 +397,7 @@ def _extract_total_from_filters(nuxt: dict[str, Any]) -> int | None:
         for val in state_val.values():
             if not isinstance(val, list):
                 continue
-            total = _sum_tier_buckets(val)
+            total = _sum_experience_buckets(val)
             if total:
                 log.info(
                     "🔢 filter_total=%d found in state['%s']",
@@ -329,45 +408,71 @@ def _extract_total_from_filters(nuxt: dict[str, Any]) -> int | None:
     return None
 
 
-def _sum_tier_buckets(filter_groups: list) -> int:
-    """Search a list of filter-group dicts for the contractorTier group
-    and return the sum of bucket counts.  Returns 0 if not found."""
-    _TIER_KEYWORDS = (
-        "contractortier", "experience", "tier", "level",
-        "contractor_tier",
-    )
+def _sum_experience_buckets(filter_groups: list) -> int:
+    """Return sum of Entry/Intermediate/Expert counts if present.
+
+    This avoids false matches from unrelated filter groups that may contain
+    words like "level" and produce severe undercounts (e.g. 328 instead of 3099).
+    """
+    exp_tokens = ("entry", "intermediate", "expert")
+
+    def bucket_label(b: dict[str, Any]) -> str:
+        raw = (
+            b.get("label")
+            or b.get("name")
+            or b.get("title")
+            or b.get("id")
+            or b.get("value")
+            or ""
+        )
+        return str(raw).lower()
+
+    candidates: list[tuple[int, list[tuple[str, int]]]] = []
     for group in filter_groups:
         if not isinstance(group, dict):
             continue
-        # group name/id can be str or anything — guard with str()
-        raw_name = group.get("name") or group.get("id") or ""
-        name = str(raw_name).lower()
-        if not any(k in name for k in _TIER_KEYWORDS):
-            continue
+
         buckets = (
             group.get("buckets") or group.get("options") or
             group.get("items") or group.get("values") or []
         )
-        if not buckets:
+        if not isinstance(buckets, list) or not buckets:
             continue
+
+        labeled = [b for b in buckets if isinstance(b, dict)]
+        if not labeled:
+            continue
+
+        # Detect real Experience Level group by bucket labels, not group name.
+        # We require at least two of the canonical tokens to avoid false positives.
+        labels = [bucket_label(b) for b in labeled]
+        token_hits = {tok for tok in exp_tokens if any(tok in lb for lb in labels)}
+        if len(token_hits) < 2:
+            continue
+
         total = 0
-        for b in buckets:
-            if not isinstance(b, dict):
-                continue
+        details: list[tuple[str, int]] = []
+        for b in labeled:
             cnt = b.get("count") or b.get("value") or 0
             try:
-                total += int(cnt)
+                cnt_i = int(cnt)
+                total += cnt_i
+                details.append((bucket_label(b), cnt_i))
             except (TypeError, ValueError):
                 pass
+
         if total > 0:
-            log.info(
-                "🔢 filter_total=%d (contractorTier buckets: %s)",
-                total,
-                [(str(b.get("label") or b.get("name") or b.get("id")),
-                  b.get("count")) for b in buckets
-                 if isinstance(b, dict)],
-            )
-            return total
+            candidates.append((total, details))
+
+    if candidates:
+        total, details = max(candidates, key=lambda item: item[0])
+        log.info(
+            "🔢 filter_total=%d (experience buckets: %s)",
+            total,
+            details,
+        )
+        return total
+
     return 0
 
 
@@ -1153,6 +1258,36 @@ class UpworkScraperService:
                         "🔢 [page %d] filter_total=%d (paging.total=%d)",
                         page_num, filter_total, paging.get("total", 0),
                     )
+
+                # If the page is empty but totals say it should exist, retry.
+                total_jobs = paging.get("filter_total") or paging.get("total")
+                if total_jobs and not jobs:
+                    max_page = min(100, math.ceil(total_jobs / PER_PAGE))
+                    if page_num <= max_page:
+                        log.warning(
+                            "Empty jobs on page %d but total=%d suggests data; retrying",
+                            page_num,
+                            total_jobs,
+                        )
+                        if attempt < self.max_retries:
+                            await asyncio.sleep(backoff)
+                            continue
+                        return None, {}
+
+                # Ambiguous response: no jobs and no total metadata.
+                # Treat as transient parse/load failure, not a real empty page.
+                if not jobs and not total_jobs:
+                    log.warning(
+                        "Ambiguous empty payload on page %d (no jobs, no totals) "
+                        "attempt %d/%d; retrying",
+                        page_num,
+                        attempt,
+                        self.max_retries,
+                    )
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(backoff)
+                        continue
+                    return None, {}
 
                 return jobs, paging
 
