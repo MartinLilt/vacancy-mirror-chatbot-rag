@@ -201,12 +201,15 @@ def _build_url(
     Returns:
         Full Upwork search URL string.
     """
+    # Upwork treats `page=1` and omitted page as equivalent.
+    # Use canonical first-page URL to reduce repetitive request signatures.
     url = (
         f"{SEARCH_BASE}"
         f"?category2_uid={category_uid}"
         f"&per_page={PER_PAGE}"
-        f"&page={page}"
     )
+    if page > 1:
+        url += f"&page={page}"
     if extra_params:
         for key, value in extra_params.items():
             url += f"&{key}={value}"

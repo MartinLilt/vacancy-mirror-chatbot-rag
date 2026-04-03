@@ -56,6 +56,13 @@ services:
       COOKIE_BACKUP_PATH: /app/data/session_cookies.json
       # FlareSolverr
       FLARESOLVERR_URL: http://flaresolverr:8191/v1
+      # Dedicated sticky proxy for FlareSolverr (supports session rotation)
+      FLARESOLVERR_PROXY_URL: ${FLARESOLVERR_PROXY_URL:-}
+      # Runtime knobs for Cloudflare timeout handling
+      FLARESOLVERR_MAX_TIMEOUT_MS: ${FLARESOLVERR_MAX_TIMEOUT_MS:-120000}
+      FLARESOLVERR_TIMEOUT_COOLDOWN_SEC: ${FLARESOLVERR_TIMEOUT_COOLDOWN_SEC:-35}
+      FLARESOLVERR_TIMEOUT_BACKOFF_MULT: ${FLARESOLVERR_TIMEOUT_BACKOFF_MULT:-1.8}
+      FLARESOLVERR_ROTATE_AFTER_TIMEOUTS: ${FLARESOLVERR_ROTATE_AFTER_TIMEOUTS:-999}
       # Webshare API for real proxy usage telemetry
       WEBSHARE_API_KEY: ${WEBSHARE_API_KEY:-}
     ports:

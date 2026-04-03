@@ -30,15 +30,12 @@ Proxy settings are intentionally split:
 - `PROXY_URL` -> used by **scraper Chrome** (nodriver)
 - `FLARESOLVERR_PROXY_URL` -> used by **FlareSolverr**
 
-Default stable setup:
+Current stable setup:
 
-- `PROXY_URL` = residential proxy (optional, for scraper browser)
-- `FLARESOLVERR_PROXY_URL` = empty (FlareSolverr direct egress)
+- `PROXY_URL` = residential proxy for nodriver Chrome
+- `FLARESOLVERR_PROXY_URL` = **sticky residential proxy** for FlareSolverr
 
-Reason: some authenticated proxy formats break Chromium inside FlareSolverr and cause:
-
-- `ERR_NO_SUPPORTED_PROXIES`
-- local Chrome error HTML (~246 KB)
+Important: scraper resilience now depends on dedicated FlareSolverr proxy + runtime timeout handling.
 
 ## Configuration
 
@@ -50,12 +47,46 @@ SCRAPER_SERVER_IP=178.104.110.28
 
 PROXY_URL=
 FLARESOLVERR_PROXY_URL=
+WEBSHARE_API_KEY=
+
+# FlareSolverr anti-timeout knobs
+FLARESOLVERR_MAX_TIMEOUT_MS=120000
+FLARESOLVERR_TIMEOUT_COOLDOWN_SEC=35
+FLARESOLVERR_TIMEOUT_BACKOFF_MULT=1.8
+FLARESOLVERR_ROTATE_AFTER_TIMEOUTS=2
 ```
 
 Server 2 compose (`infra/deploy/docker-compose.server2.yml`) already maps:
 
 - `flaresolverr.environment.PROXY_URL: ${FLARESOLVERR_PROXY_URL:-}`
 - `scraper.environment.PROXY_URL: ${PROXY_URL:-}`
+- `scraper.environment.FLARESOLVERR_PROXY_URL: ${FLARESOLVERR_PROXY_URL:-}`
+- `scraper.environment.FLARESOLVERR_*` timeout/backoff/rotation knobs
+- `scraper.environment.WEBSHARE_API_KEY: ${WEBSHARE_API_KEY:-}`
+
+## Cloudflare Timeout Handling (Current)
+
+In `scraper/src/scraper/services/upwork_scraper.py`:
+
+- FlareSolverr solve timeout is configurable (`FLARESOLVERR_MAX_TIMEOUT_MS`, default `120000`).
+- Timeout retries use separate cooldown/backoff (defaults `35s`, multiplier `1.8`).
+- After repeated timeout errors, scraper rotates FlareSolverr proxy session username (when proxy username supports session pattern).
+
+Typical timeout symptom in logs:
+
+- `FlareSolverr HTTP error 500 ... Timeout after 120.0 seconds.`
+- `Timeout cooldown before retry ...`
+- `Rotated FlareSolverr proxy session username` (when rotation succeeded)
+
+If you see `Proxy session rotation skipped: username has no session pattern`, check that scraper container actually received `FLARESOLVERR_PROXY_URL` with sticky/session-capable username.
+
+## Real Proxy Usage Telemetry
+
+Proxy usage is collected from Webshare API and stored in Postgres table `proxy_usage_snapshots`.
+
+- CLI command: `python -m scraper.cli collect-proxy-usage`
+- Cron inside scraper container: every 15 minutes
+- Grafana panel `Residential Proxy Usage (MB/h, real)` reads real usage from DB snapshots
 
 ## Deploy Commands
 
@@ -96,44 +127,49 @@ docker exec scraper tail -f /var/log/scraper.log
 docker logs -f flaresolverr
 ```
 
-## Incident Runbook: `ERR_NO_SUPPORTED_PROXIES`
+## Incident Runbook: FlareSolverr Timeout / Proxy Issues
 
 Symptoms:
 
-- scraper log: `FlareSolverr proxy BROKEN`
-- FlareSolverr returns Chrome error page
-- HTML often around ~246 KB with `<title>www.upwork.com</title>`
+- scraper log: `FlareSolverr HTTP error 500 ... Timeout after ...`
+- repeated `Error solving the challenge`
+- or `FlareSolverr proxy BROKEN` / Chrome error HTML
 
 Steps:
 
-1. Check FlareSolverr env:
+1. Check env in both containers:
 
 ```bash
 docker exec flaresolverr env | grep PROXY_URL
+docker exec scraper env | grep -E 'PROXY_URL|FLARESOLVERR_PROXY_URL|FLARESOLVERR_MAX_TIMEOUT_MS'
 ```
 
-2. Temporarily disable FlareSolverr proxy (safe mode):
+2. Verify sticky proxy is present in `/etc/vacancy-mirror/.env`:
 
 ```bash
-sed -i 's|^FLARESOLVERR_PROXY_URL=.*|FLARESOLVERR_PROXY_URL=|' /etc/vacancy-mirror/.env
+grep -E '^FLARESOLVERR_PROXY_URL=' /etc/vacancy-mirror/.env
+```
+
+3. Recreate both services after env/compose changes:
+
+```bash
 cd /etc/vacancy-mirror
 docker compose up -d --no-deps --force-recreate flaresolverr scraper
 ```
 
-3. Verify FlareSolverr response is no longer proxy-error page:
+4. Verify FlareSolverr health:
 
 ```bash
-curl -s -X POST http://localhost:8191/v1 \
-  -H 'Content-Type: application/json' \
-  -d '{"cmd":"request.get","url":"https://www.upwork.com/nx/search/jobs/?q=python&sort=recency","maxTimeout":60000}'
+curl -s http://localhost:8191/health
 ```
 
-4. Start scraper session again and watch logs.
+5. Start scraper session again and watch logs.
 
 ## Repo Map (Operational)
 
 - `scraper/scripts/chaos_runner.sh` -> main cron entrypoint
 - `scraper/src/scraper/services/upwork_scraper.py` -> page load and extraction logic
+- `scraper/src/scraper/services/webshare.py` -> Webshare proxy usage collector
 - `infra/deploy/docker-compose.server2.yml` -> scraper production stack
 - `infra/deploy/deploy.sh` -> deployment orchestration
 - `ship.sh` -> build + push + deploy wrapper
