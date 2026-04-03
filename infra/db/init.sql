@@ -125,3 +125,21 @@ CREATE TABLE IF NOT EXISTS raw_jobs (
 CREATE INDEX IF NOT EXISTS raw_jobs_category_uid_idx ON raw_jobs (category_uid);
 
 CREATE INDEX IF NOT EXISTS raw_jobs_scrape_run_id_idx ON raw_jobs (scrape_run_id);
+
+-- ---------------------------------------------------------------------------
+-- proxy_usage_snapshots — real proxy usage telemetry (Webshare API)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS proxy_usage_snapshots (
+    id BIGSERIAL PRIMARY KEY,
+    provider TEXT NOT NULL DEFAULT 'webshare',
+    source_endpoint TEXT,
+    requests_used BIGINT,
+    bytes_used BIGINT,
+    bytes_remaining BIGINT,
+    bytes_limit BIGINT,
+    raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS proxy_usage_snapshots_captured_at_idx
+    ON proxy_usage_snapshots (captured_at);

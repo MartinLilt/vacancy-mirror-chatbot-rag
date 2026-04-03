@@ -258,11 +258,47 @@
     },
     {
       "id": 7,
+      "title": "Residential Proxy Usage (MB/h, real)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PCC52D03280B7034C"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PCC52D03280B7034C"
+          },
+          "rawSql": "WITH hourly AS ( SELECT date_trunc('hour', captured_at) AS time, MAX(bytes_used) AS used_bytes FROM proxy_usage_snapshots WHERE captured_at > NOW() - INTERVAL '24 hours' AND bytes_used IS NOT NULL GROUP BY 1 ), deltas AS ( SELECT time, GREATEST(used_bytes - LAG(used_bytes) OVER (ORDER BY time), 0) AS delta_bytes FROM hourly ) SELECT time, ROUND((COALESCE(delta_bytes, 0) / 1048576.0)::numeric, 2) AS mb_per_hour FROM deltas ORDER BY 1",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix:MB/h",
+          "color": { "mode": "fixed", "fixedColor": "orange" },
+          "custom": { "fillOpacity": 16 }
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "hidden" }
+      }
+    },
+    {
+      "id": 14,
       "title": "📊 Category Scraping Progress",
       "type": "text",
       "gridPos": {
         "x": 0,
-        "y": 44,
+        "y": 52,
         "w": 24,
         "h": 14
       },
@@ -277,7 +313,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 58,
+        "y": 66,
         "w": 12,
         "h": 8
       },
@@ -314,7 +350,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 58,
+        "y": 66,
         "w": 12,
         "h": 8
       },
@@ -351,7 +387,7 @@
       "type": "stat",
       "gridPos": {
         "x": 0,
-        "y": 66,
+        "y": 74,
         "w": 8,
         "h": 4
       },
@@ -381,7 +417,7 @@
       "type": "stat",
       "gridPos": {
         "x": 8,
-        "y": 66,
+        "y": 74,
         "w": 8,
         "h": 4
       },
@@ -416,7 +452,7 @@
       "type": "stat",
       "gridPos": {
         "x": 16,
-        "y": 66,
+        "y": 74,
         "w": 8,
         "h": 4
       },
@@ -442,5 +478,5 @@
     }
   ],
   "schemaVersion": 36,
-  "version": 3
+  "version": 5
 }

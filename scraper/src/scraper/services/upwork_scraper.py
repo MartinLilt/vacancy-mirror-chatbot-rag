@@ -49,8 +49,10 @@ import math
 import os
 import random
 import re
+import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import nodriver as uc
 
@@ -572,6 +574,19 @@ class UpworkScraperService:
             "FLARESOLVERR_URL", "http://localhost:8191/v1"
         )
         self.flaresolverr = FlareSolverrClient(api_url=flaresolverr_url)
+        self.flaresolverr_max_timeout_ms = int(
+            os.environ.get("FLARESOLVERR_MAX_TIMEOUT_MS", "120000")
+        )
+        self.flaresolverr_timeout_cooldown_sec = float(
+            os.environ.get("FLARESOLVERR_TIMEOUT_COOLDOWN_SEC", "35")
+        )
+        self.flaresolverr_timeout_backoff_mult = float(
+            os.environ.get("FLARESOLVERR_TIMEOUT_BACKOFF_MULT", "1.8")
+        )
+        self.flaresolverr_rotate_after_timeouts = int(
+            os.environ.get("FLARESOLVERR_ROTATE_AFTER_TIMEOUTS", "2")
+        )
+        self._flaresolverr_timeout_streak = 0
 
     def _random_delay(self) -> float:
         """Return a uniformly sampled delay from [min, max].
@@ -748,9 +763,10 @@ class UpworkScraperService:
         try:
             solution = self.flaresolverr.solve(
                 url=url,
-                max_timeout=60000,  # 60 seconds
+                max_timeout=self.flaresolverr_max_timeout_ms,
                 proxy=self.flaresolverr_proxy_url,
             )
+            self._flaresolverr_timeout_streak = 0
 
             log.info(
                 "✅ FlareSolverr solved! Cookies: %d, HTML: %d bytes",
@@ -760,10 +776,84 @@ class UpworkScraperService:
             return solution
 
         except Exception as e:
+            err = str(e)
+            if self._is_flaresolverr_timeout_error(err):
+                self._flaresolverr_timeout_streak += 1
+                log.warning(
+                    "⏱ FlareSolverr timeout streak=%d/%d",
+                    self._flaresolverr_timeout_streak,
+                    self.flaresolverr_rotate_after_timeouts,
+                )
+                if (
+                    self._flaresolverr_timeout_streak
+                    >= self.flaresolverr_rotate_after_timeouts
+                ):
+                    self._rotate_flaresolverr_proxy_session()
+                    self._flaresolverr_timeout_streak = 0
             log.error("❌ FlareSolverr failed: %s", e)
             raise RuntimeError(
                 f"Could not bypass Cloudflare with FlareSolverr: {e}"
             ) from e
+
+    @staticmethod
+    def _is_flaresolverr_timeout_error(error_text: str) -> bool:
+        text = error_text.lower()
+        return (
+            "timeout after" in text
+            and "error solving the challenge" in text
+        ) or (
+            "flaresolverr http error 500" in text and "timeout" in text
+        )
+
+    @staticmethod
+    def _with_rotated_session(username: str) -> str | None:
+        # Support usernames that already include session token.
+        if "session-" in username:
+            base = username.split("session-", 1)[0]
+            token = f"vm{int(time.time())}{random.randint(1000,9999)}"
+            return f"{base}session-{token}"
+
+        # Webshare style supports adding session token suffix.
+        if "-country-" in username or "-us-" in username:
+            token = f"vm{int(time.time())}{random.randint(1000,9999)}"
+            return f"{username}-session-{token}"
+
+        return None
+
+    def _rotate_flaresolverr_proxy_session(self) -> None:
+        proxy = self.flaresolverr_proxy_url
+        if not proxy:
+            return
+
+        parsed = urlsplit(proxy)
+        if (
+            not parsed.scheme
+            or not parsed.hostname
+            or not parsed.port
+            or not parsed.username
+        ):
+            log.warning("Cannot rotate proxy session: invalid proxy URL format")
+            return
+
+        rotated_user = self._with_rotated_session(parsed.username)
+        if not rotated_user:
+            log.warning(
+                "Proxy session rotation skipped: username has no session pattern"
+            )
+            return
+
+        auth = quote(rotated_user, safe="")
+        if parsed.password:
+            auth = f"{auth}:{quote(parsed.password, safe='')}"
+        netloc = f"{auth}@{parsed.hostname}:{parsed.port}"
+        rotated_proxy = urlunsplit(
+            (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+        )
+
+        self.flaresolverr_proxy_url = rotated_proxy
+        if self.proxy_url == proxy:
+            self.proxy_url = rotated_proxy
+        log.warning("🔁 Rotated FlareSolverr proxy session username")
 
     async def stop_browser(self) -> None:
         """Close the browser gracefully.
@@ -1292,12 +1382,24 @@ class UpworkScraperService:
                 return jobs, paging
 
             except Exception as e:
+                timeout_hit = self._is_flaresolverr_timeout_error(str(e))
                 log.error(
                     "Error loading page %d (attempt %d/%d): %s",
                     page_num, attempt, self.max_retries, e,
                 )
                 if attempt < self.max_retries:
-                    await asyncio.sleep(backoff)
+                    delay = backoff
+                    if timeout_hit:
+                        timeout_backoff = (
+                            self.flaresolverr_timeout_cooldown_sec
+                            * (self.flaresolverr_timeout_backoff_mult ** (attempt - 1))
+                        )
+                        delay = max(delay, timeout_backoff)
+                        log.warning(
+                            "⏳ Timeout cooldown before retry: %.1fs",
+                            delay,
+                        )
+                    await asyncio.sleep(delay)
                 continue
 
         log.error(

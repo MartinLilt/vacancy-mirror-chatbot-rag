@@ -11,6 +11,7 @@ Classes:
 from __future__ import annotations
 
 import logging
+import json
 from typing import Any
 
 import psycopg2
@@ -378,3 +379,55 @@ class ScraperPostgresService:
             scrape_run_id,
         )
         return inserted, total_dups
+
+    # ------------------------------------------------------------------
+    # Proxy usage snapshots
+    # ------------------------------------------------------------------
+
+    def insert_proxy_usage_snapshot(
+        self,
+        provider: str,
+        source_endpoint: str,
+        requests_used: int | None,
+        bytes_used: int | None,
+        bytes_remaining: int | None,
+        bytes_limit: int | None,
+        raw_payload: dict[str, Any],
+    ) -> int:
+        """Store one proxy usage snapshot row and return inserted id."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO proxy_usage_snapshots (
+                    provider,
+                    source_endpoint,
+                    requests_used,
+                    bytes_used,
+                    bytes_remaining,
+                    bytes_limit,
+                    raw_payload,
+                    captured_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, NOW())
+                RETURNING id
+                """,
+                (
+                    provider,
+                    source_endpoint,
+                    requests_used,
+                    bytes_used,
+                    bytes_remaining,
+                    bytes_limit,
+                    json.dumps(raw_payload),
+                ),
+            )
+            snapshot_id: int = cur.fetchone()[0]
+        self.conn.commit()
+        log.info(
+            "Proxy usage snapshot stored id=%d provider=%s bytes_used=%s requests=%s",
+            snapshot_id,
+            provider,
+            bytes_used,
+            requests_used,
+        )
+        return snapshot_id
+

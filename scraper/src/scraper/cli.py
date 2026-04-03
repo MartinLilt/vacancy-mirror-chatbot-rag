@@ -24,10 +24,12 @@ import argparse
 import asyncio
 import logging
 import math
+import os
 import sys
 
 from scraper.categories import CATEGORY_UIDS, CATEGORY_TOTAL_JOBS
 from scraper.services.postgres import ScraperPostgresService
+from scraper.services.webshare import WebshareClient
 from scraper.services.upwork_scraper import (
     CategoryScraperService,
     UpworkScraperService,
@@ -288,6 +290,24 @@ def _parse_args() -> argparse.Namespace:
             "Category display name (default: "
             "'Web, Mobile & Software Dev')."
         ),
+    )
+
+    # ── collect-proxy-usage ───────────────────────────────────────────
+    usage_p = sub.add_parser(
+        "collect-proxy-usage",
+        help="Fetch real proxy usage from Webshare API and store snapshot in DB.",
+    )
+    usage_p.add_argument(
+        "--db-url",
+        default=None,
+        metavar="URL",
+        help="PostgreSQL connection URL. Falls back to DATABASE_URL env var.",
+    )
+    usage_p.add_argument(
+        "--api-key",
+        default=None,
+        metavar="KEY",
+        help="Webshare API key. Falls back to WEBSHARE_API_KEY env var.",
     )
     inspect_p.add_argument(
         "--expected-uid",
@@ -1425,6 +1445,42 @@ async def _cmd_warmup(args: argparse.Namespace) -> None:
         await service.stop_browser()
 
 
+def _cmd_collect_proxy_usage(args: argparse.Namespace) -> None:
+    """Collect one real proxy usage snapshot from Webshare into Postgres."""
+    db_url = args.db_url or os.getenv("DATABASE_URL")
+    api_key = args.api_key or os.getenv("WEBSHARE_API_KEY")
+
+    if not db_url:
+        raise RuntimeError("DATABASE_URL is not set")
+    if not api_key:
+        raise RuntimeError("WEBSHARE_API_KEY is not set")
+
+    client = WebshareClient(api_key=api_key)
+    snap = client.fetch_usage_snapshot()
+
+    db = ScraperPostgresService(db_url)
+    try:
+        snapshot_id = db.insert_proxy_usage_snapshot(
+            provider="webshare",
+            source_endpoint=snap.endpoint,
+            requests_used=snap.requests_used,
+            bytes_used=snap.bytes_used,
+            bytes_remaining=snap.bytes_remaining,
+            bytes_limit=snap.bytes_limit,
+            raw_payload=snap.raw_payload,
+        )
+    finally:
+        db.close()
+
+    log.info(
+        "✅ Proxy usage collected (snapshot id=%d, endpoint=%s, bytes_used=%s, requests=%s)",
+        snapshot_id,
+        snap.endpoint,
+        snap.bytes_used,
+        snap.requests_used,
+    )
+
+
 def main() -> None:
     """Dispatch CLI command."""
     args = _parse_args()
@@ -1439,6 +1495,8 @@ def main() -> None:
         asyncio.run(_cmd_inspect_category(args))
     elif args.command == "warmup":
         asyncio.run(_cmd_warmup(args))
+    elif args.command == "collect-proxy-usage":
+        _cmd_collect_proxy_usage(args)
     else:
         log.error("Unknown command: %s", args.command)
         sys.exit(1)
