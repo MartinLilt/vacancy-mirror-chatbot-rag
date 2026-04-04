@@ -5,7 +5,13 @@ Production monorepo with two independent runtime domains:
 - `backend/` -> Telegram bot, Stripe webhook, RAG pipeline
 - `scraper/` -> Upwork ingestion (chaos mode), FlareSolverr, scraper API
 
-This README is operator-first and reflects the **current stable scraper approach**.
+This README is operator-first and reflects the **current production state**.
+
+## Current Focus (2026-04-03)
+
+- **Active workstream now**: `backend/` on server `178.104.113.58`.
+- **Scraper status**: stable and intentionally frozen for now.
+- Do not introduce scraper-side refactors unless a production incident reappears.
 
 ## System Boundaries (Important)
 
@@ -91,6 +97,21 @@ Proxy usage is collected from Webshare API and stored in Postgres table `proxy_u
 ## Deploy Commands
 
 Use from repo root.
+
+Backend deploy (current focus):
+
+```bash
+bash ship.sh backend
+```
+
+Or step-by-step backend:
+
+```bash
+bash infra/deploy/push-images.sh backend
+bash infra/deploy/deploy.sh backend
+```
+
+Scraper deploy (only if scraper incident):
 
 ```bash
 bash ship.sh scraper
@@ -195,3 +216,16 @@ docker exec scraper python3 -c 'import scraper; print("ok")'
 ```
 
 If all checks pass, scraper can be started safely from the console/UI.
+
+## System Message (Backend-only)
+
+Use this scope guard for next sessions:
+
+```text
+Work only on backend server side (178.104.113.58) and backend code paths.
+Treat scraper as frozen/stable unless explicitly requested by user.
+Do not change scraper runtime, scraper compose, or scraper deployment flows by default.
+Keep backend and scraper responsibilities strictly separated.
+For incidents: first confirm whether issue belongs to backend or scraper before editing anything.
+```
+

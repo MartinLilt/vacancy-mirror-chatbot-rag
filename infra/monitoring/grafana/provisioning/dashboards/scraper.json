@@ -276,7 +276,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PCC52D03280B7034C"
           },
-          "rawSql": "WITH hourly AS ( SELECT date_trunc('hour', captured_at) AS time, MAX(bytes_used) AS used_bytes FROM proxy_usage_snapshots WHERE captured_at > NOW() - INTERVAL '24 hours' AND bytes_used IS NOT NULL GROUP BY 1 ), deltas AS ( SELECT time, GREATEST(used_bytes - LAG(used_bytes) OVER (ORDER BY time), 0) AS delta_bytes FROM hourly ) SELECT time, ROUND((COALESCE(delta_bytes, 0) / 1048576.0)::numeric, 2) AS mb_per_hour FROM deltas ORDER BY 1",
+          "rawSql": "WITH bounds AS ( SELECT to_timestamp($__unixEpochFrom())::timestamptz AS from_ts, to_timestamp($__unixEpochTo())::timestamptz AS to_ts ), hours AS ( SELECT generate_series( date_trunc('hour', (SELECT from_ts FROM bounds)) - INTERVAL '1 hour', date_trunc('hour', (SELECT to_ts FROM bounds)), INTERVAL '1 hour' ) AS time ), snapshots AS ( SELECT date_trunc('hour', captured_at) AS time, MAX(bytes_used) AS bytes_used FROM proxy_usage_snapshots WHERE provider = 'webshare' AND bytes_used IS NOT NULL AND captured_at <= (SELECT to_ts FROM bounds) GROUP BY 1 ), joined AS ( SELECT h.time, s.bytes_used FROM hours h LEFT JOIN snapshots s USING (time) ), filled AS ( SELECT time, MAX(bytes_used) OVER ( ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ) AS bytes_filled FROM joined ), deltas AS ( SELECT time, GREATEST( bytes_filled - LAG(bytes_filled) OVER (ORDER BY time), 0 ) AS delta_bytes FROM filled ) SELECT time, ROUND((COALESCE(delta_bytes, 0) / 1048576.0)::numeric, 2) AS mb_per_hour FROM deltas WHERE time >= date_trunc('hour', (SELECT from_ts FROM bounds)) ORDER BY 1",
           "format": "time_series",
           "refId": "A"
         }
@@ -478,5 +478,5 @@
     }
   ],
   "schemaVersion": 36,
-  "version": 5
+  "version": 6
 }

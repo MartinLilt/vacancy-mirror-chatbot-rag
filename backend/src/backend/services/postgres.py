@@ -727,3 +727,62 @@ class PostgresJobExportService:
                 )
                 row = cur.fetchone()
         return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # Bot chat usage tracking (for trial/plan limits)
+    # ------------------------------------------------------------------
+
+    def ensure_bot_chat_usage_table(self) -> None:
+        """Create bot_chat_usage table for per-user request tracking."""
+        ddl = """
+        CREATE TABLE IF NOT EXISTS bot_chat_usage (
+            id BIGSERIAL PRIMARY KEY,
+            telegram_user_id BIGINT NOT NULL,
+            plan TEXT NOT NULL DEFAULT 'free',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS bot_chat_usage_user_time_idx
+        ON bot_chat_usage (telegram_user_id, created_at DESC);
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(ddl)
+            conn.commit()
+
+    def count_bot_chat_requests_last_24h(
+        self,
+        telegram_user_id: int,
+    ) -> int:
+        """Return how many chat requests a user made in the last 24h."""
+        self.ensure_bot_chat_usage_table()
+        sql = """
+        SELECT COUNT(*)
+        FROM bot_chat_usage
+        WHERE telegram_user_id = %(telegram_user_id)s
+          AND created_at >= NOW() - INTERVAL '24 hours';
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {"telegram_user_id": telegram_user_id})
+                row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+    def insert_bot_chat_request(
+        self,
+        telegram_user_id: int,
+        plan: str = "free",
+    ) -> None:
+        """Log a single bot chat request event."""
+        self.ensure_bot_chat_usage_table()
+        sql = """
+        INSERT INTO bot_chat_usage (telegram_user_id, plan)
+        VALUES (%(telegram_user_id)s, %(plan)s);
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {
+                    "telegram_user_id": telegram_user_id,
+                    "plan": plan,
+                })
+            conn.commit()
+

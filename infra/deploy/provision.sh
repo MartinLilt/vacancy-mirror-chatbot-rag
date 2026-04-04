@@ -169,6 +169,37 @@ systemctl enable --now docker
 REMOTE
 }
 
+ensure_docker_forwarding_persistent() {
+    local ip="$1"
+    log "[$ip] Ensuring persistent Docker forwarding rules ..."
+    run_remote "$ip" bash <<'REMOTE'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq iptables-persistent netfilter-persistent
+
+# Keep host default FORWARD policy strict, but allow Docker bridge egress.
+if ! iptables -C FORWARD -i docker0 -j ACCEPT 2>/dev/null; then
+    iptables -I FORWARD 1 -i docker0 -j ACCEPT
+fi
+if ! iptables -C FORWARD -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+    iptables -I FORWARD 1 -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+fi
+
+for bridge in $(ip -o link show | awk -F': ' '/: br-/{print $2}'); do
+    if ! iptables -C FORWARD -i "$bridge" -j ACCEPT 2>/dev/null; then
+        iptables -I FORWARD 1 -i "$bridge" -j ACCEPT
+    fi
+    if ! iptables -C FORWARD -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+        iptables -I FORWARD 1 -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    fi
+done
+
+netfilter-persistent save
+systemctl enable netfilter-persistent >/dev/null 2>&1 || true
+REMOTE
+}
+
 # ---------------------------------------------------------------------------
 # 4. Backend server setup
 # ---------------------------------------------------------------------------
@@ -179,6 +210,7 @@ setup_backend_server() {
 
     wait_for_ssh "$ip"
     install_docker_remote "$ip"
+    ensure_docker_forwarding_persistent "$ip"
 
     log "[$ip] Logging into GHCR ..."
     run_remote "$ip" \
@@ -236,6 +268,7 @@ setup_scraper_server() {
 
     wait_for_ssh "$scraper_ip"
     install_docker_remote "$scraper_ip"
+    ensure_docker_forwarding_persistent "$scraper_ip"
 
     log "[$scraper_ip] Logging into GHCR ..."
     run_remote "$scraper_ip" \
@@ -294,12 +327,22 @@ open_postgres_for_scraper() {
     backend_ip=$(server_ip "$BACKEND_SERVER")
     scraper_ip=$(server_ip "$SCRAPER_SERVER")
 
-    # Allow scraper → postgres (5432) via ufw
+    # Allow scraper -> postgres (5432). Prefer ufw when available,
+    # otherwise use iptables directly.
     log "Allowing $scraper_ip to reach postgres on backend ..."
     run_remote "$backend_ip" bash <<REMOTE
 set -euo pipefail
-ufw allow from ${scraper_ip} to any port 5432 proto tcp
-ufw --force enable
+if command -v ufw >/dev/null 2>&1; then
+    ufw allow from ${scraper_ip} to any port 5432 proto tcp
+    ufw --force enable
+else
+    if ! iptables -C INPUT -p tcp -s ${scraper_ip} --dport 5432 -j ACCEPT 2>/dev/null; then
+        iptables -I INPUT 1 -p tcp -s ${scraper_ip} --dport 5432 -j ACCEPT
+    fi
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save
+    fi
+fi
 REMOTE
 }
 

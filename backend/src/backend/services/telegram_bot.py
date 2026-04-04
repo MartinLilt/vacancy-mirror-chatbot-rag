@@ -21,10 +21,12 @@ DB_URL : str
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -50,17 +52,29 @@ from backend.services.google_sheets import (
     GoogleSheetsService,
     build_user_row,
 )
+from backend.services.openai import OpenAIMarketAssistantService
 from backend.services.postgres import PostgresJobExportService
+from backend.services.reasoning_orchestrator import ReasoningOrchestrator
 
 log = logging.getLogger(__name__)
 
 # -- Conversation states --------------------------------------------------
 WAITING_QUERY = 0
+TRIAL_WAITING_QUERY = 1
 
 # Support conversation states
 SUP_WAITING_MESSAGE = 10
 SUP_WAITING_REPLY_CHOICE = 11
 SUP_WAITING_EMAIL = 12
+
+TRIAL_FOOTER = "\n\n—\nFree trial limit: 35 requests / 24h"
+PLAN_LIMITS_24H: dict[str, int] = {
+    "free": 35,
+    "plus": 60,
+    "pro_plus": 120,
+}
+TRIAL_HISTORY_KEY = "trial_chat_history"
+TRIAL_HISTORY_MAX_MESSAGES = 8
 
 # -- Callback data constants ---------------------------------------------
 CB_CHAT = "cb_chat"
@@ -89,6 +103,62 @@ def _get_allowed_ids() -> set[int]:
 def _is_allowed(user_id: int, allowed: set[int]) -> bool:
     """Return True when the user is permitted to use the bot."""
     return not allowed or user_id in allowed
+
+
+def _env_flag(name: str, default: str = "1") -> bool:
+    """Parse bool-like env flags such as 1/0, true/false, yes/no."""
+    raw = os.environ.get(name, default).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _get_trial_history(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, str]]:
+    """Return mutable trial history list from per-user context."""
+    history = context.user_data.get(TRIAL_HISTORY_KEY)
+    if not isinstance(history, list):
+        history = []
+        context.user_data[TRIAL_HISTORY_KEY] = history
+    return history
+
+
+def _append_trial_history(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    role: str,
+    content: str,
+) -> None:
+    """Append one message to trial history with bounded size."""
+    text = content.strip()
+    if not text:
+        return
+    history = _get_trial_history(context)
+    history.append({"role": role, "content": text})
+    if len(history) > TRIAL_HISTORY_MAX_MESSAGES:
+        del history[:-TRIAL_HISTORY_MAX_MESSAGES]
+
+
+def _normalize_telegram_text(text: str) -> str:
+    """Convert model output into predictable plain text for Telegram."""
+    value = text.strip()
+    if not value:
+        return value
+
+    # Normalize line breaks and common unsupported tags.
+    value = re.sub(r"<br\s*/?>", "\n", value, flags=re.IGNORECASE)
+    value = re.sub(r"</p\s*>", "\n\n", value, flags=re.IGNORECASE)
+    value = re.sub(r"<p[^>]*>", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"<li[^>]*>\s*", "• ", value, flags=re.IGNORECASE)
+    value = re.sub(r"</li\s*>", "\n", value, flags=re.IGNORECASE)
+    value = re.sub(r"</?(ul|ol)[^>]*>", "", value, flags=re.IGNORECASE)
+
+    # Convert common plain-text pseudo-lists to visible bullet lines.
+    value = re.sub(r"(?m)^\s{2,}(?![•\-*])(\S.+)$", r"• \1", value)
+    value = re.sub(r"(?m)^\s*[-*]\s+", "• ", value)
+
+    # Strip any remaining HTML/XML tags to guarantee plain-text output.
+    value = re.sub(r"</?[a-z0-9]+[^>]*>", "", value, flags=re.IGNORECASE)
+
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
 
 
 # -- Keyboards -----------------------------------------------------------
@@ -200,13 +270,10 @@ async def cmd_start(
             "🤖 AI answers on skills, roles & market trends\n"
             "📈 Know what the market wants before you apply\n\n"
 
-            "🔜 *Coming soon:*\n"
-            "▸ LinkedIn & Freelancer\\.com data\n"
-            "▸ Salary & rate benchmarks\n"
-            "▸ Personalised market reports\n"
-            "▸ Fiverr integration is under consideration\n\n"
-
-            "📡 *Powered by:* Upwork\n\n"
+            "📡 *Data sources:* publicly available freelance market data\n"
+            "including Google Trends signals for trend analytics\\.\n\n"
+            "🧠 We continuously collect and analyse market signals to "
+            "produce aggregated freelance trends and insights\\.\n\n"
 
             "🚀 Ready to explore the market?\n"
             "Pick an option below 👇"
@@ -230,17 +297,137 @@ async def cmd_help(
 async def cb_chat(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    """Handle 'Chat with assistant' button."""
+) -> int:
+    """Handle 'Chat with assistant' button and enter trial chat mode."""
     query = update.callback_query
     await query.answer()
     await query.message.reply_text(
         "💬 *Trial chat*\n\n"
         "Ask me anything about the job market ✍️\n\n"
         "_e\\.g\\. \"What skills do React devs need?\"_\n\n"
-        "_tap /cancel to exit_",
+        "_tap /cancel to exit_"
+        f"{TRIAL_FOOTER}",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
+    return TRIAL_WAITING_QUERY
+
+
+async def trial_receive_query(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Answer trial chat message with limit checks and LLM response."""
+    allowed: set[int] = context.bot_data["allowed_ids"]
+    user = update.effective_user
+    if not _is_allowed(user.id, allowed):
+        return ConversationHandler.END
+
+    prompt = (update.message.text or "").strip()
+    if not prompt:
+        await update.message.reply_text(
+            "⚠️ Please send a non-empty message."
+        )
+        return TRIAL_WAITING_QUERY
+
+    db: PostgresJobExportService = context.bot_data["db"]
+    assistant: OpenAIMarketAssistantService = context.bot_data[
+        "assistant_llm"
+    ]
+    orchestrator: ReasoningOrchestrator | None = context.bot_data.get(
+        "assistant_orchestrator"
+    )
+
+    plan = "free"
+    limit = PLAN_LIMITS_24H["free"]
+    try:
+        sub = db.get_subscription(user.id)
+        if sub and sub.get("status") == "active":
+            plan = str(sub.get("plan", "free"))
+            limit = PLAN_LIMITS_24H.get(plan, PLAN_LIMITS_24H["free"])
+    except Exception:  # noqa: BLE001
+        pass
+
+    used = db.count_bot_chat_requests_last_24h(user.id)
+    if used >= limit:
+        await update.message.reply_text(
+            (
+                f"⛔ You reached your current limit: {limit} "
+                "requests in 24h.\n"
+                "Please try again later or upgrade your plan."
+                f"{TRIAL_FOOTER}"
+            )
+        )
+        return TRIAL_WAITING_QUERY
+
+    thinking = await update.message.reply_text(
+        "🤖 Assistant is thinking..."
+    )
+
+    async def _set_status(text: str) -> None:
+        try:
+            await thinking.edit_text(text)
+        except Exception:  # noqa: BLE001
+            # Status updates are optional UX; ignore transient edit failures.
+            pass
+
+    try:
+        history = _get_trial_history(context)
+        if orchestrator is not None:
+            loop = asyncio.get_running_loop()
+            stage_map = {
+                "layer1_start": "🧠 Step 1/3: Understanding your request...",
+                "layer2_start": "🧭 Step 2/3: Building response plan...",
+                "layer3_start": "✍️ Step 3/3: Finalizing answer...",
+            }
+
+            def _on_stage(stage: str) -> None:
+                text = stage_map.get(stage)
+                if not text:
+                    return
+                asyncio.run_coroutine_threadsafe(
+                    _set_status(text),
+                    loop,
+                )
+
+            result = await asyncio.to_thread(
+                orchestrator.run,
+                question=prompt,
+                history=history,
+                stage_callback=_on_stage,
+            )
+            answer = result.final_answer
+        else:
+            await _set_status("🔎 Looking for relevant context...")
+            answer = assistant.answer_market_question(question=prompt)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Trial chat failed: %s", exc)
+        try:
+            answer = assistant.answer_market_question(question=prompt)
+        except Exception as fallback_exc:  # noqa: BLE001
+            log.exception("Trial chat fallback failed: %s", fallback_exc)
+            await thinking.edit_text(
+                "⚠️ Sorry, something went wrong while generating the answer."
+                " Please try again."
+            )
+            return TRIAL_WAITING_QUERY
+
+    _append_trial_history(context, role="user", content=prompt)
+    _append_trial_history(context, role="assistant", content=answer)
+    rendered_answer = _normalize_telegram_text(answer)
+
+    try:
+        db.insert_bot_chat_request(
+            telegram_user_id=user.id,
+            plan=plan,
+        )
+        used += 1
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to log trial chat usage: %s", exc)
+
+    await thinking.edit_text(
+        f"{rendered_answer}\n\n—\nUsed {used}/{limit}"
+    )
+    return TRIAL_WAITING_QUERY
 
 
 async def cb_benefits(
@@ -1189,6 +1376,7 @@ async def handle_cancel(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     """Cancel the current conversation."""
+    context.user_data.pop(TRIAL_HISTORY_KEY, None)
     await update.message.reply_text("❌ Cancelled.")
     return ConversationHandler.END
 
@@ -1252,6 +1440,16 @@ class TelegramBotService:
             db_url=db_url
         )
         self.sheets: GoogleSheetsService = GoogleSheetsService()
+        self.assistant_llm = OpenAIMarketAssistantService()
+        self.orchestrator_enabled = _env_flag(
+            "ASSISTANT_ORCHESTRATOR_ENABLED", default="1"
+        )
+        self.assistant_orchestrator: ReasoningOrchestrator | None = None
+        if self.orchestrator_enabled:
+            self.assistant_orchestrator = ReasoningOrchestrator(
+                llm=self.assistant_llm,
+                max_history_messages=TRIAL_HISTORY_MAX_MESSAGES,
+            )
 
     def _build_application(self) -> Application:
         """Build and configure the telegram Application."""
@@ -1265,6 +1463,28 @@ class TelegramBotService:
         app.bot_data["allowed_ids"] = self.allowed_ids
         app.bot_data["db"] = self.db
         app.bot_data["sheets"] = self.sheets
+        app.bot_data["assistant_llm"] = self.assistant_llm
+        app.bot_data["assistant_orchestrator"] = self.assistant_orchestrator
+
+        # Trial chat conversation (triggered by inline button)
+        trial_conv = ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(cb_chat, pattern=CB_CHAT),
+            ],
+            states={
+                TRIAL_WAITING_QUERY: [
+                    CallbackQueryHandler(cb_chat, pattern=CB_CHAT),
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND,
+                        trial_receive_query,
+                    ),
+                ],
+            },
+            fallbacks=[
+                CommandHandler("cancel", handle_cancel),
+            ],
+            allow_reentry=True,
+        )
 
         # /search conversation
         search_conv = ConversationHandler(
@@ -1324,10 +1544,8 @@ class TelegramBotService:
         app.add_handler(CommandHandler("stats", cmd_stats))
         app.add_handler(CommandHandler("restart", cmd_restart))
         app.add_handler(search_conv)
+        app.add_handler(trial_conv)
         app.add_handler(support_conv)
-        app.add_handler(
-            CallbackQueryHandler(cb_chat, pattern=CB_CHAT)
-        )
         app.add_handler(
             CallbackQueryHandler(cb_benefits, pattern=CB_BENEFITS)
         )
@@ -1388,4 +1606,14 @@ class TelegramBotService:
             )
 
         app.post_init = _post_init
-        app.run_polling(drop_pending_updates=True)
+        drop_pending_raw = os.environ.get(
+            "TELEGRAM_DROP_PENDING_UPDATES",
+            "false",
+        ).strip().lower()
+        drop_pending = drop_pending_raw in {"1", "true", "yes", "on"}
+
+        # Keep retrying startup when Telegram API is temporarily unreachable.
+        app.run_polling(
+            drop_pending_updates=drop_pending,
+            bootstrap_retries=-1,
+        )
