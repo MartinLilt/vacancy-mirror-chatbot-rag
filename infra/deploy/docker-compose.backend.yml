@@ -62,5 +62,24 @@ services:
     depends_on:
       - api
 
+  grafana-backend:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_BACKEND_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: ${GRAFANA_BACKEND_ROOT_URL:-http://localhost:3001}
+      GF_PANELS_DISABLE_SANITIZE_HTML: "true"
+      DB_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - grafana-backend-data:/var/lib/grafana
+      - /etc/vacancy-mirror/grafana-backend/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres-data:
+  grafana-backend-data:

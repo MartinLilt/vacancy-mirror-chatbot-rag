@@ -36,6 +36,8 @@ DB_PASSWORD="${DB_PASSWORD:?DB_PASSWORD is required}"
 OPENAI_API_KEY="${OPENAI_API_KEY:?OPENAI_API_KEY is required}"
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-4.1-mini}"
+GRAFANA_BACKEND_PASSWORD="${GRAFANA_BACKEND_PASSWORD:-admin}"
+GRAFANA_BACKEND_ROOT_URL="${GRAFANA_BACKEND_ROOT_URL:-}"
 
 # Hetzner settings
 SERVER_TYPE="cx23"            # 2 vCPU, 4 GB RAM, x86, nbg1
@@ -140,6 +142,13 @@ copy_file() {
         "$src" "root@$ip:$dst"
 }
 
+copy_dir() {
+    local ip="$1" src="$2" dst="$3"
+    scp -r -o StrictHostKeyChecking=no \
+        -i "$SSH_KEY_PATH" \
+        "$src/." "root@$ip:$dst"
+}
+
 # ---------------------------------------------------------------------------
 # 3. Install Docker on a remote server
 # ---------------------------------------------------------------------------
@@ -227,6 +236,8 @@ DB_URL=postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
 OPENAI_API_KEY=${OPENAI_API_KEY}
 OPENAI_MODEL=${OPENAI_MODEL}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+GRAFANA_BACKEND_PASSWORD=${GRAFANA_BACKEND_PASSWORD}
+GRAFANA_BACKEND_ROOT_URL=${GRAFANA_BACKEND_ROOT_URL}
 ENV
 
     log "[$ip] Copying docker-compose.backend.yml ..."
@@ -244,6 +255,12 @@ ENV
     copy_file "$ip" \
         "infra/db/init.sql" \
         "/etc/vacancy-mirror/db/init.sql"
+
+    log "[$ip] Copying backend Grafana provisioning ..."
+    run_remote "$ip" "mkdir -p /etc/vacancy-mirror/grafana-backend/provisioning"
+    copy_dir "$ip" \
+        "infra/monitoring/grafana-backend/provisioning" \
+        "/etc/vacancy-mirror/grafana-backend/provisioning"
 
     log "[$ip] Pulling images and starting backend stack ..."
     run_remote "$ip" bash <<REMOTE

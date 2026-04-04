@@ -696,6 +696,40 @@ class PostgresJobExportService:
                 rows = cur.fetchall()
         return [dict(row) for row in rows]
 
+    def get_user_for_sheet(
+        self,
+        telegram_user_id: int,
+    ) -> dict[str, Any] | None:
+        """Return one bot user joined with subscription data for Sheets upsert."""
+        self.ensure_bot_users_table()
+        self.ensure_subscriptions_table()
+        sql = """
+        SELECT
+            u.telegram_user_id,
+            u.first_name,
+            u.last_name,
+            u.username,
+            COALESCE(s.plan, 'free')  AS plan,
+            COALESCE(s.status, 'none') AS status,
+            COALESCE(s.stripe_customer_id, '') AS stripe_customer_id,
+            COALESCE(s.stripe_subscription_id, '')
+                AS stripe_subscription_id,
+            u.first_seen,
+            u.last_seen AS last_updated
+        FROM bot_users u
+        LEFT JOIN subscriptions s
+            ON s.telegram_user_id = u.telegram_user_id
+        WHERE u.telegram_user_id = %(telegram_user_id)s
+        LIMIT 1;
+        """
+        with self._connect() as conn:
+            with conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor
+            ) as cur:
+                cur.execute(sql, {"telegram_user_id": telegram_user_id})
+                row = cur.fetchone()
+        return dict(row) if row else None
+
     def get_subscription_by_stripe_customer(
         self,
         stripe_customer_id: str,
@@ -727,6 +761,74 @@ class PostgresJobExportService:
                 )
                 row = cur.fetchone()
         return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # Support feedback events (Telegram Contact Support flow)
+    # ------------------------------------------------------------------
+
+    def ensure_support_feedback_events_table(self) -> None:
+        """Create support_feedback_events table for Grafana dashboard."""
+        ddl = """
+        CREATE TABLE IF NOT EXISTS support_feedback_events (
+            id BIGSERIAL PRIMARY KEY,
+            telegram_user_id BIGINT NOT NULL,
+            telegram_username TEXT NOT NULL DEFAULT '',
+            telegram_full_name TEXT NOT NULL DEFAULT '',
+            reply_channel TEXT NOT NULL, -- telegram | email | none
+            reply_email TEXT NOT NULL DEFAULT '',
+            feedback_message TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS support_feedback_events_created_at_idx
+            ON support_feedback_events (created_at DESC);
+        CREATE INDEX IF NOT EXISTS support_feedback_events_user_id_idx
+            ON support_feedback_events (telegram_user_id);
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(ddl)
+            conn.commit()
+
+    def insert_support_feedback_event(
+        self,
+        *,
+        telegram_user_id: int,
+        telegram_username: str,
+        telegram_full_name: str,
+        reply_channel: str,
+        feedback_message: str,
+        reply_email: str = "",
+    ) -> None:
+        """Insert one support feedback event for Grafana consumption."""
+        self.ensure_support_feedback_events_table()
+        sql = """
+        INSERT INTO support_feedback_events (
+            telegram_user_id,
+            telegram_username,
+            telegram_full_name,
+            reply_channel,
+            reply_email,
+            feedback_message
+        ) VALUES (
+            %(telegram_user_id)s,
+            %(telegram_username)s,
+            %(telegram_full_name)s,
+            %(reply_channel)s,
+            %(reply_email)s,
+            %(feedback_message)s
+        );
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {
+                    "telegram_user_id": telegram_user_id,
+                    "telegram_username": telegram_username or "",
+                    "telegram_full_name": telegram_full_name or "",
+                    "reply_channel": reply_channel,
+                    "reply_email": reply_email or "",
+                    "feedback_message": feedback_message,
+                })
+            conn.commit()
 
     # ------------------------------------------------------------------
     # Bot chat usage tracking (for trial/plan limits)

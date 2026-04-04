@@ -224,22 +224,41 @@ async def cmd_start(
             username=user.username or "",
         )
         gs: GoogleSheetsService = context.bot_data["sheets"]
-        gs.upsert_user(build_user_row(
-            telegram_user_id=user.id,
-            first_name=user.first_name or "",
-            last_name=user.last_name or "",
-            username=user.username or "",
-            plan=sub["plan"] if sub else "free",
-            status=sub["status"] if sub else "none",
-            stripe_customer_id=(
-                sub.get("stripe_customer_id", "")
-                if sub else ""
-            ),
-            stripe_subscription_id=(
-                sub.get("stripe_subscription_id", "")
-                if sub else ""
-            ),
-        ))
+        sheet_row = db_service.get_user_for_sheet(user.id)
+        if sheet_row:
+            gs.upsert_user(build_user_row(
+                telegram_user_id=user.id,
+                first_name=str(sheet_row.get("first_name", "")),
+                last_name=str(sheet_row.get("last_name", "")),
+                username=str(sheet_row.get("username", "")),
+                plan=str(sheet_row.get("plan", "free")),
+                status=str(sheet_row.get("status", "none")),
+                stripe_customer_id=str(
+                    sheet_row.get("stripe_customer_id", "")
+                ),
+                stripe_subscription_id=str(
+                    sheet_row.get("stripe_subscription_id", "")
+                ),
+                first_seen=str(sheet_row.get("first_seen", "")),
+                last_updated=str(sheet_row.get("last_updated", "")),
+            ))
+        else:
+            gs.upsert_user(build_user_row(
+                telegram_user_id=user.id,
+                first_name=user.first_name or "",
+                last_name=user.last_name or "",
+                username=user.username or "",
+                plan=sub["plan"] if sub else "free",
+                status=sub["status"] if sub else "none",
+                stripe_customer_id=(
+                    sub.get("stripe_customer_id", "")
+                    if sub else ""
+                ),
+                stripe_subscription_id=(
+                    sub.get("stripe_subscription_id", "")
+                    if sub else ""
+                ),
+            ))
     except Exception as exc:  # noqa: BLE001
         log.warning("Failed to sync user to Sheets: %s", exc)
 
@@ -924,6 +943,19 @@ def _reply_choice_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _is_valid_email(value: str) -> bool:
+    """Return True for a basic user-provided email address."""
+    return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value.strip()))
+
+
+def _support_username(user: object) -> str:
+    """Normalize Telegram username for storage and display."""
+    raw = (getattr(user, "username", "") or "").strip()
+    if not raw:
+        return ""
+    return raw if raw.startswith("@") else f"@{raw}"
+
+
 async def cb_privacy(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1149,6 +1181,17 @@ async def sup_reply_tg(
         "Expect a response within *3 business days*\\. ⏳",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
+    try:
+        db: PostgresJobExportService = context.bot_data["db"]
+        db.insert_support_feedback_event(
+            telegram_user_id=update.effective_user.id,
+            telegram_username=_support_username(update.effective_user),
+            telegram_full_name=update.effective_user.full_name or "",
+            reply_channel="telegram",
+            feedback_message=context.user_data.get("sup_message", ""),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to persist support feedback (telegram): %s", exc)
     context.user_data.pop("sup_message", None)
     return ConversationHandler.END
 
@@ -1173,6 +1216,13 @@ async def sup_receive_email(
 ) -> int:
     """Receive email address, forward to admin and finish."""
     email = update.message.text.strip()
+    if not _is_valid_email(email):
+        await update.message.reply_text(
+            "⚠️ Please enter a valid email address \\(example: name@example\\.com\\)\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return SUP_WAITING_EMAIL
+
     await _forward_to_admin(
         context=context,
         user=update.effective_user,
@@ -1185,6 +1235,18 @@ async def sup_receive_email(
         "Expect a response within *3 business days*\\. ⏳",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
+    try:
+        db: PostgresJobExportService = context.bot_data["db"]
+        db.insert_support_feedback_event(
+            telegram_user_id=update.effective_user.id,
+            telegram_username=_support_username(update.effective_user),
+            telegram_full_name=update.effective_user.full_name or "",
+            reply_channel="email",
+            reply_email=email,
+            feedback_message=context.user_data.get("sup_message", ""),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to persist support feedback (email): %s", exc)
     context.user_data.pop("sup_message", None)
     return ConversationHandler.END
 
@@ -1207,6 +1269,17 @@ async def sup_no_reply(
         "Thank you for your feedback\\. 🙏",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
+    try:
+        db: PostgresJobExportService = context.bot_data["db"]
+        db.insert_support_feedback_event(
+            telegram_user_id=update.effective_user.id,
+            telegram_username=_support_username(update.effective_user),
+            telegram_full_name=update.effective_user.full_name or "",
+            reply_channel="none",
+            feedback_message=context.user_data.get("sup_message", ""),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to persist support feedback (no-reply): %s", exc)
     context.user_data.pop("sup_message", None)
     return ConversationHandler.END
 
@@ -1544,8 +1617,10 @@ class TelegramBotService:
         app.add_handler(CommandHandler("stats", cmd_stats))
         app.add_handler(CommandHandler("restart", cmd_restart))
         app.add_handler(search_conv)
-        app.add_handler(trial_conv)
+        # Keep support flow before trial flow so feedback text is routed
+        # to Contact Support when both conversations are active.
         app.add_handler(support_conv)
+        app.add_handler(trial_conv)
         app.add_handler(
             CallbackQueryHandler(cb_benefits, pattern=CB_BENEFITS)
         )

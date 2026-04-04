@@ -58,20 +58,51 @@ run_remote_scraper() {
         "root@${SCRAPER_SERVER_IP}" "$@"
 }
 
+copy_to_backend() {
+    local src="$1" dst="$2"
+    scp -o StrictHostKeyChecking=no \
+        -i "$SSH_KEY_PATH" \
+        "$src" "root@${BACKEND_SERVER_IP}:$dst"
+}
+
+copy_dir_to_backend() {
+    local src="$1" dst="$2"
+    scp -r -o StrictHostKeyChecking=no \
+        -i "$SSH_KEY_PATH" \
+        "$src/." "root@${BACKEND_SERVER_IP}:$dst"
+}
+
 # ---------------------------------------------------------------------------
 # Redeploy backend (restarts the running container)
 # ---------------------------------------------------------------------------
 deploy_backend() {
     log "--- Redeploying backend on ${BACKEND_SERVER_IP} ---"
+
+    # Sync compose and backend Grafana provisioning before restart.
+    local tmp_compose
+    tmp_compose=$(mktemp)
+    sed "s|\${GHCR_USER}|${GHCR_USER}|g" \
+        "$REPO_ROOT/infra/deploy/docker-compose.backend.yml" > "$tmp_compose"
+    run_remote "mkdir -p /etc/vacancy-mirror/grafana-backend/provisioning"
+    copy_to_backend "$tmp_compose" "/etc/vacancy-mirror/docker-compose.yml"
+    rm -f "$tmp_compose"
+    copy_dir_to_backend \
+        "$REPO_ROOT/infra/monitoring/grafana-backend/provisioning" \
+        "/etc/vacancy-mirror/grafana-backend/provisioning"
+
     run_remote \
         "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin"
     run_remote bash <<'REMOTE'
 set -euo pipefail
 cd /etc/vacancy-mirror
 docker compose pull backend
-docker compose up -d --no-deps backend
+if docker compose config --services | grep -qx 'grafana-backend'; then
+  docker compose up -d --no-deps backend grafana-backend
+else
+  docker compose up -d --no-deps backend
+fi
 echo "Backend container restarted."
-docker logs vacancy-mirror-backend-1 --tail 20 2>&1 || true
+docker compose logs backend --tail 20 2>&1 || true
 REMOTE
     log "Backend redeployed."
 }
