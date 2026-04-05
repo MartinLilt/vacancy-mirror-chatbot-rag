@@ -39,6 +39,14 @@ services:
       STRIPE_PRO_PLUS_URL: ${STRIPE_PRO_PLUS_URL:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      SUPPORT_API_TOKEN: ${SUPPORT_API_TOKEN:-}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      SUPPORT_FROM_EMAIL: ${SUPPORT_FROM_EMAIL:-support@vacancy-mirror.com}
+      CHATWOOT_BASE_URL: ${CHATWOOT_BASE_URL:-}
+      CHATWOOT_ACCOUNT_ID: ${CHATWOOT_ACCOUNT_ID:-}
+      CHATWOOT_INBOX_ID: ${CHATWOOT_INBOX_ID:-}
+      CHATWOOT_API_ACCESS_TOKEN: ${CHATWOOT_API_ACCESS_TOKEN:-}
+      CHATWOOT_WEBHOOK_TOKEN: ${CHATWOOT_WEBHOOK_TOKEN:-}
       WEBHOOK_PORT: ${WEBHOOK_PORT:-8080}
       WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL:-}
       GOOGLE_SHEETS_ID: ${GOOGLE_SHEETS_ID:-}
@@ -46,12 +54,31 @@ services:
       # Scraper API endpoint (on Server 2)
       SCRAPER_API_URL: ${SCRAPER_API_URL:-}
       SCRAPER_API_KEY: ${SCRAPER_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m backend.cli telegram-bot
+
+  support-webhook:
+    image: ghcr.io/martinlilt/vacancy-mirror-backend:latest
+    restart: unless-stopped
+    environment:
+      DB_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      STRIPE_PLUS_URL: ${STRIPE_PLUS_URL:-}
+      STRIPE_PRO_PLUS_URL: ${STRIPE_PRO_PLUS_URL:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      SUPPORT_API_TOKEN: ${SUPPORT_API_TOKEN:-}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      SUPPORT_FROM_EMAIL: ${SUPPORT_FROM_EMAIL:-support@vacancy-mirror.com}
+      CHATWOOT_WEBHOOK_TOKEN: ${CHATWOOT_WEBHOOK_TOKEN:-}
+      WEBHOOK_PORT: ${WEBHOOK_PORT:-8080}
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
-    command: python -m backend.cli telegram-bot
+    command: python -m backend.cli stripe-webhook --port 8080
 
 volumes:
   postgres-data:

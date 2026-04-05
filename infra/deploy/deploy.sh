@@ -85,6 +85,7 @@ deploy_backend() {
         "$REPO_ROOT/infra/deploy/docker-compose.backend.yml" > "$tmp_compose"
     run_remote "mkdir -p /etc/vacancy-mirror/grafana-backend/provisioning"
     copy_to_backend "$tmp_compose" "/etc/vacancy-mirror/docker-compose.yml"
+    copy_to_backend "$REPO_ROOT/infra/deploy/nginx.conf" "/etc/vacancy-mirror/nginx.conf"
     rm -f "$tmp_compose"
     copy_dir_to_backend \
         "$REPO_ROOT/infra/monitoring/grafana-backend/provisioning" \
@@ -96,10 +97,11 @@ deploy_backend() {
 set -euo pipefail
 cd /etc/vacancy-mirror
 docker compose pull backend
+docker compose pull support-webhook || true
 if docker compose config --services | grep -qx 'grafana-backend'; then
-  docker compose up -d --no-deps backend grafana-backend
+  docker compose up -d --no-deps backend support-webhook grafana-backend nginx
 else
-  docker compose up -d --no-deps backend
+  docker compose up -d --no-deps backend support-webhook nginx
 fi
 echo "Backend container restarted."
 docker compose logs backend --tail 20 2>&1 || true

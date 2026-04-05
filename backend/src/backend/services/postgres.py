@@ -780,6 +780,8 @@ class PostgresJobExportService:
             status TEXT NOT NULL DEFAULT 'new', -- new | in_progress | replied | closed
             assigned_to TEXT NOT NULL DEFAULT '',
             last_reply_at TIMESTAMPTZ,
+            chatwoot_conversation_id BIGINT,
+            chatwoot_contact_id BIGINT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         ALTER TABLE support_feedback_events
@@ -788,12 +790,18 @@ class PostgresJobExportService:
             ADD COLUMN IF NOT EXISTS assigned_to TEXT NOT NULL DEFAULT '';
         ALTER TABLE support_feedback_events
             ADD COLUMN IF NOT EXISTS last_reply_at TIMESTAMPTZ;
+        ALTER TABLE support_feedback_events
+            ADD COLUMN IF NOT EXISTS chatwoot_conversation_id BIGINT;
+        ALTER TABLE support_feedback_events
+            ADD COLUMN IF NOT EXISTS chatwoot_contact_id BIGINT;
         CREATE INDEX IF NOT EXISTS support_feedback_events_created_at_idx
             ON support_feedback_events (created_at DESC);
         CREATE INDEX IF NOT EXISTS support_feedback_events_user_id_idx
             ON support_feedback_events (telegram_user_id);
         CREATE INDEX IF NOT EXISTS support_feedback_events_status_idx
             ON support_feedback_events (status);
+        CREATE INDEX IF NOT EXISTS support_feedback_events_chatwoot_conversation_idx
+            ON support_feedback_events (chatwoot_conversation_id);
         """
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -811,13 +819,22 @@ class PostgresJobExportService:
             reply_text TEXT NOT NULL,
             operator_name TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL, -- sent | failed
+            source TEXT NOT NULL DEFAULT 'support_api', -- support_api | chatwoot
+            external_message_id TEXT NOT NULL DEFAULT '',
             error_message TEXT NOT NULL DEFAULT '',
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE support_replies
+            ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'support_api';
+        ALTER TABLE support_replies
+            ADD COLUMN IF NOT EXISTS external_message_id TEXT NOT NULL DEFAULT '';
         CREATE INDEX IF NOT EXISTS support_replies_event_id_idx
             ON support_replies (feedback_event_id);
         CREATE INDEX IF NOT EXISTS support_replies_created_at_idx
             ON support_replies (created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS support_replies_external_message_id_uidx
+            ON support_replies (external_message_id)
+            WHERE external_message_id <> '';
         """
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -833,8 +850,8 @@ class PostgresJobExportService:
         reply_channel: str,
         feedback_message: str,
         reply_email: str = "",
-    ) -> None:
-        """Insert one support feedback event for Grafana consumption."""
+    ) -> int:
+        """Insert one support feedback event and return its ID."""
         self.ensure_support_feedback_events_table()
         sql = """
         INSERT INTO support_feedback_events (
@@ -853,7 +870,8 @@ class PostgresJobExportService:
             %(reply_email)s,
             %(feedback_message)s,
             'new'
-        );
+        )
+        RETURNING id;
         """
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -865,7 +883,38 @@ class PostgresJobExportService:
                     "reply_email": reply_email or "",
                     "feedback_message": feedback_message,
                 })
+                event_id_row = cur.fetchone()
             conn.commit()
+        if not event_id_row:
+            raise RuntimeError("Failed to create support feedback event.")
+        return int(event_id_row[0])
+
+    def set_support_feedback_chatwoot_link(
+        self,
+        *,
+        event_id: int,
+        conversation_id: int,
+        contact_id: int = 0,
+    ) -> bool:
+        """Attach Chatwoot conversation metadata to support feedback."""
+        self.ensure_support_feedback_events_table()
+        sql = """
+        UPDATE support_feedback_events
+        SET
+            chatwoot_conversation_id = %(conversation_id)s,
+            chatwoot_contact_id = %(contact_id)s
+        WHERE id = %(event_id)s;
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {
+                    "event_id": event_id,
+                    "conversation_id": conversation_id,
+                    "contact_id": contact_id if contact_id > 0 else None,
+                })
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
 
     def get_support_feedback_inbox(
         self,
@@ -887,6 +936,8 @@ class PostgresJobExportService:
             feedback_message,
             status,
             assigned_to,
+            chatwoot_conversation_id,
+            chatwoot_contact_id,
             last_reply_at
         FROM support_feedback_events
         """
@@ -922,6 +973,8 @@ class PostgresJobExportService:
             feedback_message,
             status,
             assigned_to,
+            chatwoot_conversation_id,
+            chatwoot_contact_id,
             last_reply_at
         FROM support_feedback_events
         WHERE id = %(event_id)s
@@ -934,6 +987,62 @@ class PostgresJobExportService:
                 cur.execute(sql, {"event_id": event_id})
                 row = cur.fetchone()
         return dict(row) if row else None
+
+    def get_support_feedback_event_by_chatwoot_conversation(
+        self,
+        *,
+        conversation_id: int,
+    ) -> dict[str, Any] | None:
+        """Return support feedback event linked to Chatwoot conversation."""
+        self.ensure_support_feedback_events_table()
+        sql = """
+        SELECT
+            id,
+            created_at,
+            telegram_user_id,
+            telegram_username,
+            telegram_full_name,
+            reply_channel,
+            reply_email,
+            feedback_message,
+            status,
+            assigned_to,
+            chatwoot_conversation_id,
+            chatwoot_contact_id,
+            last_reply_at
+        FROM support_feedback_events
+        WHERE chatwoot_conversation_id = %(conversation_id)s
+        ORDER BY id DESC
+        LIMIT 1;
+        """
+        with self._connect() as conn:
+            with conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor
+            ) as cur:
+                cur.execute(sql, {"conversation_id": conversation_id})
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def support_reply_exists_by_external_message_id(
+        self,
+        *,
+        external_message_id: str,
+    ) -> bool:
+        """Return True if reply for external message ID already stored."""
+        marker = external_message_id.strip()
+        if not marker:
+            return False
+        self.ensure_support_replies_table()
+        sql = """
+        SELECT 1
+        FROM support_replies
+        WHERE external_message_id = %(external_message_id)s
+        LIMIT 1;
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {"external_message_id": marker})
+                return cur.fetchone() is not None
 
     def upsert_support_feedback_status(
         self,
@@ -997,6 +1106,8 @@ class PostgresJobExportService:
         reply_text: str,
         operator_name: str,
         status: str,
+        source: str = "support_api",
+        external_message_id: str = "",
         error_message: str = "",
     ) -> None:
         """Store one support reply delivery attempt."""
@@ -1010,6 +1121,8 @@ class PostgresJobExportService:
             reply_text,
             operator_name,
             status,
+            source,
+            external_message_id,
             error_message
         ) VALUES (
             %(feedback_event_id)s,
@@ -1018,6 +1131,8 @@ class PostgresJobExportService:
             %(reply_text)s,
             %(operator_name)s,
             %(status)s,
+            %(source)s,
+            %(external_message_id)s,
             %(error_message)s
         );
         """
@@ -1030,6 +1145,8 @@ class PostgresJobExportService:
                     "reply_text": reply_text,
                     "operator_name": operator_name,
                     "status": status,
+                    "source": source,
+                    "external_message_id": external_message_id,
                     "error_message": error_message,
                 })
             conn.commit()

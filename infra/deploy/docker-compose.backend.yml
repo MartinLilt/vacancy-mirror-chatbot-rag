@@ -40,6 +40,18 @@ services:
         condition: service_healthy
     command: python -m backend.cli telegram-bot
 
+  support-webhook:
+    image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
+    restart: unless-stopped
+    env_file:
+      - /etc/vacancy-mirror/backend.env
+    expose:
+      - "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m backend.cli stripe-webhook --port 8080
+
   api:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-api:latest
     restart: unless-stopped

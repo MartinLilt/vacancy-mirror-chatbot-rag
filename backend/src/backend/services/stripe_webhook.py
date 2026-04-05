@@ -176,6 +176,7 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
     stripe_plus_url: str
     stripe_pro_plus_url: str
     support_api_token: str
+    chatwoot_webhook_token: str
 
     def _json_response(
         self,
@@ -213,6 +214,114 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
             auth_header.removeprefix("Bearer ").strip(),
             token,
         )
+
+    def _is_chatwoot_authorized(self) -> bool:
+        """Validate Chatwoot webhook token header."""
+        token = self.chatwoot_webhook_token.strip()
+        if not token:
+            return False
+        incoming = self.headers.get("X-Chatwoot-Token", "").strip()
+        if incoming and hmac.compare_digest(incoming, token):
+            return True
+        parsed = urllib.parse.urlparse(self.path)
+        params = dict(urllib.parse.parse_qsl(parsed.query))
+        query_token = str(params.get("token", "")).strip()
+        if query_token and hmac.compare_digest(query_token, token):
+            return True
+        return False
+
+    @staticmethod
+    def _chatwoot_message_content(payload: dict[str, Any]) -> str:
+        """Extract textual content from Chatwoot webhook payload."""
+        content = payload.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        message = payload.get("message")
+        if isinstance(message, dict):
+            nested = message.get("content")
+            if isinstance(nested, str):
+                return nested.strip()
+        return ""
+
+    @staticmethod
+    def _chatwoot_conversation_id(payload: dict[str, Any]) -> int:
+        """Extract conversation ID from Chatwoot webhook payload."""
+        conversation = payload.get("conversation")
+        if isinstance(conversation, dict):
+            try:
+                return int(conversation.get("id", 0))
+            except Exception:  # noqa: BLE001
+                return 0
+        try:
+            return int(payload.get("conversation_id", 0))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    @staticmethod
+    def _chatwoot_message_id(payload: dict[str, Any]) -> str:
+        """Extract message ID for idempotency checks."""
+        value = payload.get("id")
+        if value is None:
+            message = payload.get("message")
+            if isinstance(message, dict):
+                value = message.get("id")
+        return str(value).strip() if value is not None else ""
+
+    @staticmethod
+    def _chatwoot_is_public_agent_reply(payload: dict[str, Any]) -> bool:
+        """Return True only for public outgoing agent replies."""
+        if bool(payload.get("private", False)):
+            return False
+        event_name = str(payload.get("event", "")).strip().lower()
+        if event_name and event_name != "message_created":
+            return False
+
+        message_type = payload.get("message_type")
+        if isinstance(message_type, str):
+            value = message_type.strip().lower()
+            if value not in {"outgoing", "agent"}:
+                return False
+        elif message_type is not None:
+            try:
+                # Chatwoot can send integer message type where 1 is outgoing.
+                if int(message_type) != 1:
+                    return False
+            except Exception:  # noqa: BLE001
+                return False
+
+        sender = payload.get("sender")
+        if isinstance(sender, dict):
+            sender_type = str(sender.get("type", "")).strip().lower()
+            if sender_type and sender_type not in {"user", "agent"}:
+                return False
+        return True
+
+    def _resolve_feedback_event_from_chatwoot(
+        self,
+        *,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Resolve support event by Chatwoot conversation or custom event id."""
+        conversation_id = self._chatwoot_conversation_id(payload)
+        if conversation_id > 0:
+            event = self.db.get_support_feedback_event_by_chatwoot_conversation(
+                conversation_id=conversation_id,
+            )
+            if event:
+                return event
+
+        conversation = payload.get("conversation")
+        if isinstance(conversation, dict):
+            custom = conversation.get("custom_attributes")
+            if isinstance(custom, dict):
+                event_id_raw = custom.get("support_event_id")
+                try:
+                    event_id = int(str(event_id_raw).strip())
+                except Exception:  # noqa: BLE001
+                    event_id = 0
+                if event_id > 0:
+                    return self.db.get_support_feedback_event(event_id=event_id)
+        return None
 
     def log_message(  # type: ignore[override]
         self, format: str, *args: Any
@@ -304,6 +413,141 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         """Handle POST /webhook from Stripe."""
+        if self.path == "/support/chatwoot/webhook":
+            if not self._is_chatwoot_authorized():
+                self._json_response(
+                    status=401,
+                    payload={"ok": False, "error": "unauthorized"},
+                )
+                return
+            try:
+                body = self._read_json_body()
+            except Exception as exc:  # noqa: BLE001
+                self._json_response(
+                    status=400,
+                    payload={"ok": False, "error": f"invalid_json: {exc}"},
+                )
+                return
+
+            if not self._chatwoot_is_public_agent_reply(body):
+                self._json_response(
+                    status=200,
+                    payload={"ok": True, "ignored": "not_agent_public_reply"},
+                )
+                return
+
+            message_id = self._chatwoot_message_id(body)
+            if (
+                message_id
+                and self.db.support_reply_exists_by_external_message_id(
+                    external_message_id=message_id
+                )
+            ):
+                self._json_response(
+                    status=200,
+                    payload={"ok": True, "ignored": "duplicate_message"},
+                )
+                return
+
+            event = self._resolve_feedback_event_from_chatwoot(payload=body)
+            if not event:
+                self._json_response(
+                    status=404,
+                    payload={"ok": False, "error": "support_event_not_found"},
+                )
+                return
+
+            event_id = int(event["id"])
+            reply_text = self._chatwoot_message_content(body)
+            if not reply_text:
+                self._json_response(
+                    status=400,
+                    payload={"ok": False, "error": "reply_text_required"},
+                )
+                return
+
+            sender = body.get("sender")
+            operator_name = ""
+            if isinstance(sender, dict):
+                operator_name = str(sender.get("name", "")).strip()
+            channel = str(event.get("reply_channel", "")).strip().lower()
+            sent_to = ""
+            try:
+                if channel == "telegram":
+                    chat_id = int(event["telegram_user_id"])
+                    _send_telegram_message(
+                        token=self.token,
+                        chat_id=chat_id,
+                        text=(
+                            "Support reply from Vacancy Mirror:\n\n"
+                            f"{reply_text}"
+                        ),
+                        raise_on_error=True,
+                    )
+                    sent_to = str(chat_id)
+                elif channel == "email":
+                    to_email = str(event.get("reply_email", "")).strip()
+                    if not to_email:
+                        self._json_response(
+                            status=400,
+                            payload={"ok": False, "error": "reply_email_missing_for_event"},
+                        )
+                        return
+                    sender_email = SendGridEmailSender()
+                    sender_email.send_support_reply(
+                        to_email=to_email,
+                        subject="Vacancy Mirror Support Reply",
+                        text=reply_text,
+                    )
+                    sent_to = to_email
+                else:
+                    self._json_response(
+                        status=200,
+                        payload={"ok": True, "ignored": "no_reply_requested"},
+                    )
+                    return
+
+                self.db.insert_support_reply(
+                    feedback_event_id=event_id,
+                    channel=channel,
+                    sent_to=sent_to,
+                    reply_text=reply_text,
+                    operator_name=operator_name,
+                    status="sent",
+                    source="chatwoot",
+                    external_message_id=message_id,
+                )
+                self.db.mark_support_feedback_replied(
+                    event_id=event_id,
+                    assigned_to=operator_name,
+                )
+                self._json_response(
+                    status=200,
+                    payload={
+                        "ok": True,
+                        "event_id": event_id,
+                        "channel": channel,
+                        "sent_to": sent_to,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.db.insert_support_reply(
+                    feedback_event_id=event_id,
+                    channel=channel,
+                    sent_to=sent_to,
+                    reply_text=reply_text,
+                    operator_name=operator_name,
+                    status="failed",
+                    source="chatwoot",
+                    external_message_id=message_id,
+                    error_message=str(exc),
+                )
+                self._json_response(
+                    status=500,
+                    payload={"ok": False, "error": f"reply_failed: {exc}"},
+                )
+            return
+
         if self.path == "/support/reply":
             if not self._is_support_authorized():
                 self._json_response(
@@ -390,6 +634,7 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                     reply_text=reply_text,
                     operator_name=operator_name,
                     status="sent",
+                    source="support_api",
                 )
                 self.db.mark_support_feedback_replied(
                     event_id=event_id,
@@ -412,6 +657,7 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                     reply_text=reply_text,
                     operator_name=operator_name,
                     status="failed",
+                    source="support_api",
                     error_message=str(exc),
                 )
                 self._json_response(
@@ -703,6 +949,9 @@ class StripeWebhookService:
         self.support_api_token: str = os.environ.get(
             "SUPPORT_API_TOKEN", ""
         )
+        self.chatwoot_webhook_token: str = os.environ.get(
+            "CHATWOOT_WEBHOOK_TOKEN", ""
+        )
 
         if not self.secret:
             log.warning(
@@ -724,6 +973,7 @@ class StripeWebhookService:
                 "stripe_plus_url": self.stripe_plus_url,
                 "stripe_pro_plus_url": self.stripe_pro_plus_url,
                 "support_api_token": self.support_api_token,
+                "chatwoot_webhook_token": self.chatwoot_webhook_token,
             },
         )
         server = http.server.HTTPServer(

@@ -52,6 +52,7 @@ from backend.services.google_sheets import (
     GoogleSheetsService,
     build_user_row,
 )
+from backend.services.chatwoot_client import ChatwootSupportClient
 from backend.services.openai import OpenAIMarketAssistantService
 from backend.services.postgres import PostgresJobExportService
 from backend.services.reasoning_orchestrator import ReasoningOrchestrator
@@ -1169,29 +1170,55 @@ async def sup_reply_tg(
     """User wants a Telegram reply — forward to admin and finish."""
     query = update.callback_query
     await query.answer()
-    await _forward_to_admin(
-        context=context,
-        user=update.effective_user,
-        reply_via="Telegram",
-        extra=None,
-    )
+    event_id: int | None = None
+    message_text = str(context.user_data.get("sup_message", "")).strip()
+    try:
+        db: PostgresJobExportService = context.bot_data["db"]
+        event_id = db.insert_support_feedback_event(
+            telegram_user_id=update.effective_user.id,
+            telegram_username=_support_username(update.effective_user),
+            telegram_full_name=update.effective_user.full_name or "",
+            reply_channel="telegram",
+            feedback_message=message_text,
+        )
+        try:
+            client = ChatwootSupportClient()
+            chatwoot = client.create_support_conversation(
+                event_id=event_id,
+                telegram_user_id=update.effective_user.id,
+                telegram_username=_support_username(update.effective_user),
+                telegram_full_name=update.effective_user.full_name or "",
+                reply_channel="telegram",
+                feedback_message=message_text,
+            )
+            db.set_support_feedback_chatwoot_link(
+                event_id=event_id,
+                conversation_id=int(chatwoot.get("conversation_id", 0)),
+                contact_id=int(chatwoot.get("contact_id", 0)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to push support feedback to Chatwoot: %s", exc)
+            await _forward_to_admin(
+                context=context,
+                user=update.effective_user,
+                reply_via="Telegram",
+                extra=None,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to persist support feedback (telegram): %s", exc)
+        await _forward_to_admin(
+            context=context,
+            user=update.effective_user,
+            reply_via="Telegram",
+            extra=None,
+        )
+
     await query.message.reply_text(
         "✅ *Message sent to support\\!*\n\n"
         "We will reply to you here in Telegram\\.\n"
         "Expect a response within *3 business days*\\. ⏳",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
-    try:
-        db: PostgresJobExportService = context.bot_data["db"]
-        db.insert_support_feedback_event(
-            telegram_user_id=update.effective_user.id,
-            telegram_username=_support_username(update.effective_user),
-            telegram_full_name=update.effective_user.full_name or "",
-            reply_channel="telegram",
-            feedback_message=context.user_data.get("sup_message", ""),
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Failed to persist support feedback (telegram): %s", exc)
     context.user_data.pop("sup_message", None)
     return ConversationHandler.END
 
@@ -1223,30 +1250,57 @@ async def sup_receive_email(
         )
         return SUP_WAITING_EMAIL
 
-    await _forward_to_admin(
-        context=context,
-        user=update.effective_user,
-        reply_via="email",
-        extra=email,
-    )
+    event_id: int | None = None
+    message_text = str(context.user_data.get("sup_message", "")).strip()
+    try:
+        db: PostgresJobExportService = context.bot_data["db"]
+        event_id = db.insert_support_feedback_event(
+            telegram_user_id=update.effective_user.id,
+            telegram_username=_support_username(update.effective_user),
+            telegram_full_name=update.effective_user.full_name or "",
+            reply_channel="email",
+            reply_email=email,
+            feedback_message=message_text,
+        )
+        try:
+            client = ChatwootSupportClient()
+            chatwoot = client.create_support_conversation(
+                event_id=event_id,
+                telegram_user_id=update.effective_user.id,
+                telegram_username=_support_username(update.effective_user),
+                telegram_full_name=update.effective_user.full_name or "",
+                reply_channel="email",
+                reply_email=email,
+                feedback_message=message_text,
+            )
+            db.set_support_feedback_chatwoot_link(
+                event_id=event_id,
+                conversation_id=int(chatwoot.get("conversation_id", 0)),
+                contact_id=int(chatwoot.get("contact_id", 0)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to push support feedback to Chatwoot: %s", exc)
+            await _forward_to_admin(
+                context=context,
+                user=update.effective_user,
+                reply_via="email",
+                extra=email,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to persist support feedback (email): %s", exc)
+        await _forward_to_admin(
+            context=context,
+            user=update.effective_user,
+            reply_via="email",
+            extra=email,
+        )
+
     await update.message.reply_text(
         "✅ *Message sent to support\\!*\n\n"
         f"We will reply to *{email}*\\.\n"
         "Expect a response within *3 business days*\\. ⏳",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
-    try:
-        db: PostgresJobExportService = context.bot_data["db"]
-        db.insert_support_feedback_event(
-            telegram_user_id=update.effective_user.id,
-            telegram_username=_support_username(update.effective_user),
-            telegram_full_name=update.effective_user.full_name or "",
-            reply_channel="email",
-            reply_email=email,
-            feedback_message=context.user_data.get("sup_message", ""),
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Failed to persist support feedback (email): %s", exc)
     context.user_data.pop("sup_message", None)
     return ConversationHandler.END
 
@@ -1258,28 +1312,53 @@ async def sup_no_reply(
     """User does not need a reply — forward to admin and finish."""
     query = update.callback_query
     await query.answer()
-    await _forward_to_admin(
-        context=context,
-        user=update.effective_user,
-        reply_via=None,
-        extra=None,
-    )
+    message_text = str(context.user_data.get("sup_message", "")).strip()
+    try:
+        db: PostgresJobExportService = context.bot_data["db"]
+        event_id = db.insert_support_feedback_event(
+            telegram_user_id=update.effective_user.id,
+            telegram_username=_support_username(update.effective_user),
+            telegram_full_name=update.effective_user.full_name or "",
+            reply_channel="none",
+            feedback_message=message_text,
+        )
+        try:
+            client = ChatwootSupportClient()
+            chatwoot = client.create_support_conversation(
+                event_id=event_id,
+                telegram_user_id=update.effective_user.id,
+                telegram_username=_support_username(update.effective_user),
+                telegram_full_name=update.effective_user.full_name or "",
+                reply_channel="none",
+                feedback_message=message_text,
+            )
+            db.set_support_feedback_chatwoot_link(
+                event_id=event_id,
+                conversation_id=int(chatwoot.get("conversation_id", 0)),
+                contact_id=int(chatwoot.get("contact_id", 0)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to push support feedback to Chatwoot: %s", exc)
+            await _forward_to_admin(
+                context=context,
+                user=update.effective_user,
+                reply_via=None,
+                extra=None,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to persist support feedback (no-reply): %s", exc)
+        await _forward_to_admin(
+            context=context,
+            user=update.effective_user,
+            reply_via=None,
+            extra=None,
+        )
+
     await query.message.reply_text(
         "✅ *Message sent to support\\!*\n\n"
         "Thank you for your feedback\\. 🙏",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
-    try:
-        db: PostgresJobExportService = context.bot_data["db"]
-        db.insert_support_feedback_event(
-            telegram_user_id=update.effective_user.id,
-            telegram_username=_support_username(update.effective_user),
-            telegram_full_name=update.effective_user.full_name or "",
-            reply_channel="none",
-            feedback_message=context.user_data.get("sup_message", ""),
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Failed to persist support feedback (no-reply): %s", exc)
     context.user_data.pop("sup_message", None)
     return ConversationHandler.END
 
