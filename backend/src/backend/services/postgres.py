@@ -777,12 +777,47 @@ class PostgresJobExportService:
             reply_channel TEXT NOT NULL, -- telegram | email | none
             reply_email TEXT NOT NULL DEFAULT '',
             feedback_message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'new', -- new | in_progress | replied | closed
+            assigned_to TEXT NOT NULL DEFAULT '',
+            last_reply_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE support_feedback_events
+            ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'new';
+        ALTER TABLE support_feedback_events
+            ADD COLUMN IF NOT EXISTS assigned_to TEXT NOT NULL DEFAULT '';
+        ALTER TABLE support_feedback_events
+            ADD COLUMN IF NOT EXISTS last_reply_at TIMESTAMPTZ;
         CREATE INDEX IF NOT EXISTS support_feedback_events_created_at_idx
             ON support_feedback_events (created_at DESC);
         CREATE INDEX IF NOT EXISTS support_feedback_events_user_id_idx
             ON support_feedback_events (telegram_user_id);
+        CREATE INDEX IF NOT EXISTS support_feedback_events_status_idx
+            ON support_feedback_events (status);
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(ddl)
+            conn.commit()
+
+    def ensure_support_replies_table(self) -> None:
+        """Create support_replies table for operator reply history."""
+        ddl = """
+        CREATE TABLE IF NOT EXISTS support_replies (
+            id BIGSERIAL PRIMARY KEY,
+            feedback_event_id BIGINT NOT NULL REFERENCES support_feedback_events(id) ON DELETE CASCADE,
+            channel TEXT NOT NULL, -- telegram | email
+            sent_to TEXT NOT NULL DEFAULT '',
+            reply_text TEXT NOT NULL,
+            operator_name TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL, -- sent | failed
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS support_replies_event_id_idx
+            ON support_replies (feedback_event_id);
+        CREATE INDEX IF NOT EXISTS support_replies_created_at_idx
+            ON support_replies (created_at DESC);
         """
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -808,14 +843,16 @@ class PostgresJobExportService:
             telegram_full_name,
             reply_channel,
             reply_email,
-            feedback_message
+            feedback_message,
+            status
         ) VALUES (
             %(telegram_user_id)s,
             %(telegram_username)s,
             %(telegram_full_name)s,
             %(reply_channel)s,
             %(reply_email)s,
-            %(feedback_message)s
+            %(feedback_message)s,
+            'new'
         );
         """
         with self._connect() as conn:
@@ -827,6 +864,173 @@ class PostgresJobExportService:
                     "reply_channel": reply_channel,
                     "reply_email": reply_email or "",
                     "feedback_message": feedback_message,
+                })
+            conn.commit()
+
+    def get_support_feedback_inbox(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return support feedback rows for inbox views."""
+        self.ensure_support_feedback_events_table()
+        query = """
+        SELECT
+            id,
+            created_at,
+            telegram_user_id,
+            telegram_username,
+            telegram_full_name,
+            reply_channel,
+            NULLIF(reply_email, '') AS reply_email,
+            feedback_message,
+            status,
+            assigned_to,
+            last_reply_at
+        FROM support_feedback_events
+        """
+        params: dict[str, Any] = {"limit": max(1, min(limit, 1000))}
+        if status:
+            query += " WHERE status = %(status)s"
+            params["status"] = status
+        query += " ORDER BY created_at DESC LIMIT %(limit)s"
+        with self._connect() as conn:
+            with conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor
+            ) as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def get_support_feedback_event(
+        self,
+        *,
+        event_id: int,
+    ) -> dict[str, Any] | None:
+        """Return one support feedback event by ID."""
+        self.ensure_support_feedback_events_table()
+        sql = """
+        SELECT
+            id,
+            created_at,
+            telegram_user_id,
+            telegram_username,
+            telegram_full_name,
+            reply_channel,
+            reply_email,
+            feedback_message,
+            status,
+            assigned_to,
+            last_reply_at
+        FROM support_feedback_events
+        WHERE id = %(event_id)s
+        LIMIT 1;
+        """
+        with self._connect() as conn:
+            with conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor
+            ) as cur:
+                cur.execute(sql, {"event_id": event_id})
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def upsert_support_feedback_status(
+        self,
+        *,
+        event_id: int,
+        status: str,
+        assigned_to: str = "",
+    ) -> bool:
+        """Update support feedback status and assignment."""
+        self.ensure_support_feedback_events_table()
+        sql = """
+        UPDATE support_feedback_events
+        SET
+            status = %(status)s,
+            assigned_to = %(assigned_to)s
+        WHERE id = %(event_id)s;
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {
+                    "event_id": event_id,
+                    "status": status,
+                    "assigned_to": assigned_to,
+                })
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
+
+    def mark_support_feedback_replied(
+        self,
+        *,
+        event_id: int,
+        assigned_to: str = "",
+    ) -> bool:
+        """Mark feedback event as replied and set reply timestamp."""
+        self.ensure_support_feedback_events_table()
+        sql = """
+        UPDATE support_feedback_events
+        SET
+            status = 'replied',
+            assigned_to = %(assigned_to)s,
+            last_reply_at = NOW()
+        WHERE id = %(event_id)s;
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {
+                    "event_id": event_id,
+                    "assigned_to": assigned_to,
+                })
+                updated = cur.rowcount > 0
+            conn.commit()
+        return updated
+
+    def insert_support_reply(
+        self,
+        *,
+        feedback_event_id: int,
+        channel: str,
+        sent_to: str,
+        reply_text: str,
+        operator_name: str,
+        status: str,
+        error_message: str = "",
+    ) -> None:
+        """Store one support reply delivery attempt."""
+        self.ensure_support_feedback_events_table()
+        self.ensure_support_replies_table()
+        sql = """
+        INSERT INTO support_replies (
+            feedback_event_id,
+            channel,
+            sent_to,
+            reply_text,
+            operator_name,
+            status,
+            error_message
+        ) VALUES (
+            %(feedback_event_id)s,
+            %(channel)s,
+            %(sent_to)s,
+            %(reply_text)s,
+            %(operator_name)s,
+            %(status)s,
+            %(error_message)s
+        );
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {
+                    "feedback_event_id": feedback_event_id,
+                    "channel": channel,
+                    "sent_to": sent_to,
+                    "reply_text": reply_text,
+                    "operator_name": operator_name,
+                    "status": status,
+                    "error_message": error_message,
                 })
             conn.commit()
 

@@ -337,30 +337,11 @@ REMOTE
 }
 
 # ---------------------------------------------------------------------------
-# 6. Open postgres port on backend server firewall FOR scraper server only
+# 6. Legacy helper (disabled): cross-server postgres access
 # ---------------------------------------------------------------------------
 open_postgres_for_scraper() {
-    local backend_ip scraper_ip
-    backend_ip=$(server_ip "$BACKEND_SERVER")
-    scraper_ip=$(server_ip "$SCRAPER_SERVER")
-
-    # Allow scraper -> postgres (5432). Prefer ufw when available,
-    # otherwise use iptables directly.
-    log "Allowing $scraper_ip to reach postgres on backend ..."
-    run_remote "$backend_ip" bash <<REMOTE
-set -euo pipefail
-if command -v ufw >/dev/null 2>&1; then
-    ufw allow from ${scraper_ip} to any port 5432 proto tcp
-    ufw --force enable
-else
-    if ! iptables -C INPUT -p tcp -s ${scraper_ip} --dport 5432 -j ACCEPT 2>/dev/null; then
-        iptables -I INPUT 1 -p tcp -s ${scraper_ip} --dport 5432 -j ACCEPT
-    fi
-    if command -v netfilter-persistent >/dev/null 2>&1; then
-        netfilter-persistent save
-    fi
-fi
-REMOTE
+    # Keep databases isolated per server. Do not open backend postgres to scraper.
+    log "Skipping cross-server postgres firewall opening (disabled by design)."
 }
 
 # ---------------------------------------------------------------------------

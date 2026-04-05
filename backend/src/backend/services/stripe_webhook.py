@@ -27,8 +27,10 @@ import logging
 import os
 import threading
 import urllib.request
+import urllib.parse
 from typing import Any
 
+from backend.services.email_sender import SendGridEmailSender
 from backend.services.google_sheets import (
     GoogleSheetsService,
     build_user_row,
@@ -93,6 +95,8 @@ def _send_telegram_message(
     token: str,
     chat_id: int,
     text: str,
+    *,
+    raise_on_error: bool = False,
 ) -> None:
     """Send a plain-text Telegram message via Bot API.
 
@@ -123,6 +127,8 @@ def _send_telegram_message(
             "Failed to send Telegram message to %s: %s",
             chat_id, exc,
         )
+        if raise_on_error:
+            raise
 
 
 def _verify_stripe_signature(
@@ -169,6 +175,44 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
     secret: str
     stripe_plus_url: str
     stripe_pro_plus_url: str
+    support_api_token: str
+
+    def _json_response(
+        self,
+        *,
+        status: int,
+        payload: dict[str, Any],
+    ) -> None:
+        """Write a JSON response with common headers."""
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_json_body(self) -> dict[str, Any]:
+        """Parse request body as JSON object."""
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length)
+        parsed = json.loads(raw.decode("utf-8"))
+        if not isinstance(parsed, dict):
+            raise ValueError("JSON body must be an object.")
+        return parsed
+
+    def _is_support_authorized(self) -> bool:
+        """Validate support API token from Authorization header."""
+        token = self.support_api_token.strip()
+        if not token:
+            return False
+        auth_header = self.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return False
+        return hmac.compare_digest(
+            auth_header.removeprefix("Bearer ").strip(),
+            token,
+        )
 
     def log_message(  # type: ignore[override]
         self, format: str, *args: Any
@@ -183,10 +227,59 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
         ``client_reference_id`` from the ``uid`` query param.
         This keeps the Telegram button URL clean (no long params).
         """
-        import urllib.parse as _up
-        parsed = _up.urlparse(self.path)
-        params = dict(_up.parse_qsl(parsed.query))
+        parsed = urllib.parse.urlparse(self.path)
+        params = dict(urllib.parse.parse_qsl(parsed.query))
         uid = params.get("uid", "")
+
+        if parsed.path == "/support/inbox":
+            if not self._is_support_authorized():
+                self._json_response(
+                    status=401,
+                    payload={"ok": False, "error": "unauthorized"},
+                )
+                return
+            status = params.get("status", "").strip() or None
+            limit_raw = params.get("limit", "200").strip()
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                self._json_response(
+                    status=400,
+                    payload={"ok": False, "error": "invalid_limit"},
+                )
+                return
+            rows = self.db.get_support_feedback_inbox(
+                status=status,
+                limit=limit,
+            )
+            self._json_response(status=200, payload={"ok": True, "items": rows})
+            return
+
+        if parsed.path.startswith("/support/inbox/"):
+            if not self._is_support_authorized():
+                self._json_response(
+                    status=401,
+                    payload={"ok": False, "error": "unauthorized"},
+                )
+                return
+            event_id_raw = parsed.path.removeprefix("/support/inbox/").strip("/")
+            try:
+                event_id = int(event_id_raw)
+            except ValueError:
+                self._json_response(
+                    status=400,
+                    payload={"ok": False, "error": "invalid_event_id"},
+                )
+                return
+            event = self.db.get_support_feedback_event(event_id=event_id)
+            if not event:
+                self._json_response(
+                    status=404,
+                    payload={"ok": False, "error": "not_found"},
+                )
+                return
+            self._json_response(status=200, payload={"ok": True, "item": event})
+            return
 
         if parsed.path == "/pay/plus":
             base = self.stripe_plus_url
@@ -211,6 +304,165 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         """Handle POST /webhook from Stripe."""
+        if self.path == "/support/reply":
+            if not self._is_support_authorized():
+                self._json_response(
+                    status=401,
+                    payload={"ok": False, "error": "unauthorized"},
+                )
+                return
+            try:
+                body = self._read_json_body()
+            except Exception as exc:  # noqa: BLE001
+                self._json_response(
+                    status=400,
+                    payload={"ok": False, "error": f"invalid_json: {exc}"},
+                )
+                return
+
+            try:
+                event_id = int(body.get("event_id"))
+            except Exception:  # noqa: BLE001
+                self._json_response(
+                    status=400,
+                    payload={"ok": False, "error": "event_id_required"},
+                )
+                return
+
+            channel = str(body.get("channel", "")).strip().lower()
+            reply_text = str(body.get("reply_text", "")).strip()
+            operator_name = str(body.get("operator", "")).strip()
+            if channel not in {"telegram", "email"}:
+                self._json_response(
+                    status=400,
+                    payload={"ok": False, "error": "channel_must_be_telegram_or_email"},
+                )
+                return
+            if not reply_text:
+                self._json_response(
+                    status=400,
+                    payload={"ok": False, "error": "reply_text_required"},
+                )
+                return
+
+            event = self.db.get_support_feedback_event(event_id=event_id)
+            if not event:
+                self._json_response(
+                    status=404,
+                    payload={"ok": False, "error": "event_not_found"},
+                )
+                return
+
+            sent_to = ""
+            try:
+                if channel == "telegram":
+                    chat_id = int(event["telegram_user_id"])
+                    _send_telegram_message(
+                        token=self.token,
+                        chat_id=chat_id,
+                        text=(
+                            "Support reply from Vacancy Mirror:\n\n"
+                            f"{reply_text}"
+                        ),
+                        raise_on_error=True,
+                    )
+                    sent_to = str(chat_id)
+                else:
+                    to_email = str(event.get("reply_email", "")).strip()
+                    if not to_email:
+                        self._json_response(
+                            status=400,
+                            payload={"ok": False, "error": "reply_email_missing_for_event"},
+                        )
+                        return
+                    sender = SendGridEmailSender()
+                    sender.send_support_reply(
+                        to_email=to_email,
+                        subject="Vacancy Mirror Support Reply",
+                        text=reply_text,
+                    )
+                    sent_to = to_email
+
+                self.db.insert_support_reply(
+                    feedback_event_id=event_id,
+                    channel=channel,
+                    sent_to=sent_to,
+                    reply_text=reply_text,
+                    operator_name=operator_name,
+                    status="sent",
+                )
+                self.db.mark_support_feedback_replied(
+                    event_id=event_id,
+                    assigned_to=operator_name,
+                )
+                self._json_response(
+                    status=200,
+                    payload={
+                        "ok": True,
+                        "event_id": event_id,
+                        "channel": channel,
+                        "sent_to": sent_to,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.db.insert_support_reply(
+                    feedback_event_id=event_id,
+                    channel=channel,
+                    sent_to=sent_to,
+                    reply_text=reply_text,
+                    operator_name=operator_name,
+                    status="failed",
+                    error_message=str(exc),
+                )
+                self._json_response(
+                    status=500,
+                    payload={"ok": False, "error": f"reply_failed: {exc}"},
+                )
+            return
+
+        if self.path == "/support/status":
+            if not self._is_support_authorized():
+                self._json_response(
+                    status=401,
+                    payload={"ok": False, "error": "unauthorized"},
+                )
+                return
+            try:
+                body = self._read_json_body()
+                event_id = int(body.get("event_id"))
+                status = str(body.get("status", "")).strip().lower()
+                operator_name = str(body.get("operator", "")).strip()
+            except Exception as exc:  # noqa: BLE001
+                self._json_response(
+                    status=400,
+                    payload={"ok": False, "error": f"invalid_request: {exc}"},
+                )
+                return
+
+            if status not in {"new", "in_progress", "replied", "closed"}:
+                self._json_response(
+                    status=400,
+                    payload={"ok": False, "error": "invalid_status"},
+                )
+                return
+
+            updated = self.db.upsert_support_feedback_status(
+                event_id=event_id,
+                status=status,
+                assigned_to=operator_name,
+            )
+            if not updated:
+                self._json_response(
+                    status=404,
+                    payload={"ok": False, "error": "event_not_found"},
+                )
+                return
+            self._json_response(
+                status=200,
+                payload={"ok": True, "event_id": event_id, "status": status},
+            )
+            return
+
         if self.path != "/webhook":
             self.send_response(404)
             self.end_headers()
@@ -448,6 +700,9 @@ class StripeWebhookService:
         self.stripe_pro_plus_url: str = os.environ.get(
             "STRIPE_PRO_PLUS_URL", ""
         )
+        self.support_api_token: str = os.environ.get(
+            "SUPPORT_API_TOKEN", ""
+        )
 
         if not self.secret:
             log.warning(
@@ -468,6 +723,7 @@ class StripeWebhookService:
                 "sheets": self.sheets,
                 "stripe_plus_url": self.stripe_plus_url,
                 "stripe_pro_plus_url": self.stripe_pro_plus_url,
+                "support_api_token": self.support_api_token,
             },
         )
         server = http.server.HTTPServer(
