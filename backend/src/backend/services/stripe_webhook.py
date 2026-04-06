@@ -208,9 +208,36 @@ def _verify_stripe_signature(
         return False
 
 
+def _to_base36(n: int) -> str:
+    """Convert a non-negative integer to a base-36 string (digits 0-9, letters A-Z).
+
+    Base-36 gives 36^6 = 2 176 782 336 unique values with 6 characters,
+    vs only 1 000 000 with plain decimal.
+    """
+    if n < 0:
+        raise ValueError("n must be non-negative")
+    chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if n == 0:
+        return "0"
+    result: list[str] = []
+    while n:
+        result.append(chars[n % 36])
+        n //= 36
+    return "".join(reversed(result))
+
+
 def _support_ticket_public_id(event_id: int) -> str:
-    """Build user-facing support ticket ID from internal event ID."""
-    return f"VM-{event_id:06d}"
+    """Build user-facing support ticket ID from internal event ID.
+
+    Format: VM-XXXXXX where X is a base-36 character (0-9 / A-Z).
+    Supports up to 2 176 782 335 tickets (36^6 - 1).
+    Examples:
+        event_id=1      → VM-000001
+        event_id=9      → VM-000009
+        event_id=10     → VM-00000A
+        event_id=999999 → VM-00LFLR
+    """
+    return f"VM-{_to_base36(event_id).zfill(6)}"
 
 
 def _support_reply_telegram_text(*, event_id: int, answer: str) -> str:
@@ -371,12 +398,25 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
         return True
 
     @staticmethod
+    def _strip_markdown(text: str) -> str:
+        """Strip common Markdown inline formatting added by Chatwoot (bold, italic, code)."""
+        import re
+        # Remove bold (**text** or __text__), italic (*text* or _text_), inline code (`text`)
+        text = re.sub(r"\*{1,2}(.*?)\*{1,2}", r"\1", text)
+        text = re.sub(r"_{1,2}(.*?)_{1,2}", r"\1", text)
+        text = re.sub(r"`(.*?)`", r"\1", text)
+        return text
+
+    @staticmethod
     def _chatwoot_is_private_close_command(payload: dict[str, Any]) -> bool:
         """Return True for private notes that close a support ticket."""
         if not bool(payload.get("private", False)):
             return False
         content = _WebhookHandler._chatwoot_message_content(payload)
-        return content.strip().lower().startswith("/end ticket")
+        # Chatwoot may render Markdown in private notes (e.g. /end ticket → **/end ticket**)
+        # so strip inline Markdown before matching the command prefix.
+        clean = _WebhookHandler._strip_markdown(content).strip().lower()
+        return clean.startswith("/end ticket")
 
     def _resolve_feedback_event_from_chatwoot(
         self,

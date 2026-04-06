@@ -80,21 +80,25 @@ class GoogleSheetsService:
         spreadsheet_id: str | None = None,
         credentials_source: str | None = None,
     ) -> None:
-        self._spreadsheet_id: str = (
+        raw_spreadsheet_id = (
             spreadsheet_id
             or os.environ.get("GOOGLE_SHEETS_ID", "")
         )
-        self._credentials_source: str = (
+        raw_credentials_source = (
             credentials_source
             or os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
         )
+        # Be tolerant to quoted env values from docker/.env loaders.
+        self._spreadsheet_id: str = str(raw_spreadsheet_id).strip().strip('"').strip("'")
+        self._credentials_source: str = str(raw_credentials_source).strip().strip('"').strip("'")
         self._client: gspread.Client | None = None
+        self._missing_config_logged = False
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def upsert_user(self, user_row: dict[str, Any]) -> None:
+    def upsert_user(self, user_row: dict[str, Any]) -> bool:
         """Insert or update a single user row in the sheet.
 
         Parameters
@@ -102,24 +106,23 @@ class GoogleSheetsService:
         user_row:
             Dict with any subset of keys from ``_HEADERS``.
             ``telegram_user_id`` is required.
+
+        Returns
+        -------
+        bool
+            True when row was written successfully, False when skipped
+            due to missing configuration or when Google API call fails.
         """
-        if not self._spreadsheet_id:
-            log.debug(
-                "GOOGLE_SHEETS_ID not set — skipping sheet sync."
-            )
-            return
-        if not self._credentials_source:
-            log.debug(
-                "GOOGLE_SERVICE_ACCOUNT_JSON not set "
-                "— skipping sheet sync."
-            )
-            return
+        if not self._is_configured():
+            return False
 
         try:
             sheet = self._get_sheet()
             self._upsert_row(sheet, user_row)
+            return True
         except Exception as exc:  # noqa: BLE001
             log.warning("Google Sheets upsert failed: %s", exc)
+            return False
 
     def sync_all(
         self, rows: list[dict[str, Any]]
@@ -133,16 +136,7 @@ class GoogleSheetsService:
         rows:
             List of user dicts; each must have ``telegram_user_id``.
         """
-        if not self._spreadsheet_id:
-            log.debug(
-                "GOOGLE_SHEETS_ID not set — skipping sheet sync."
-            )
-            return
-        if not self._credentials_source:
-            log.debug(
-                "GOOGLE_SERVICE_ACCOUNT_JSON not set "
-                "— skipping sheet sync."
-            )
+        if not self._is_configured():
             return
 
         try:
@@ -155,6 +149,23 @@ class GoogleSheetsService:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _is_configured(self) -> bool:
+        """Return True when required Google Sheets credentials are present."""
+        if self._spreadsheet_id and self._credentials_source:
+            return True
+        if not self._missing_config_logged:
+            missing: list[str] = []
+            if not self._spreadsheet_id:
+                missing.append("GOOGLE_SHEETS_ID")
+            if not self._credentials_source:
+                missing.append("GOOGLE_SERVICE_ACCOUNT_JSON")
+            log.warning(
+                "Google Sheets sync disabled: missing %s.",
+                ", ".join(missing),
+            )
+            self._missing_config_logged = True
+        return False
+
     def _build_client(self) -> gspread.Client:
         """Authenticate and return a gspread client."""
         src = self._credentials_source.strip()
@@ -162,6 +173,7 @@ class GoogleSheetsService:
         if src.startswith("{"):
             info: dict = json.loads(src)
             return gspread.service_account_from_dict(info)
+        src = os.path.expanduser(src)
         return gspread.service_account(filename=src)
 
     def _get_client(self) -> gspread.Client:
@@ -514,6 +526,10 @@ class GoogleSheetsService:
                 row_index,
                 user_id,
             )
+            log.info(
+                "Google Sheets sync applied: user_id=%s action=update",
+                user_id,
+            )
         else:
             sheet.append_row(
                 values,
@@ -521,6 +537,10 @@ class GoogleSheetsService:
             )
             log.debug(
                 "Appended new sheet row for user %s.", user_id
+            )
+            log.info(
+                "Google Sheets sync applied: user_id=%s action=append",
+                user_id,
             )
 
     def _write_all(
@@ -547,7 +567,7 @@ class GoogleSheetsService:
 def _now_iso() -> str:
     """Return current UTC time as ISO-8601 string."""
     return datetime.now(tz=timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S"
+        "%Y-%m-%d %H:%M:%S.%f"
     )
 
 

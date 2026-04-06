@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CopilotDiffPersistence">
+    <option name="pendingDiffs">
+      <map>
+        <entry key="$PROJECT_DIR$/backend/test_strip_md.py">
+          <value>
+            <PendingDiffInfo>
+              <option name="filePath" value="$PROJECT_DIR$/backend/test_strip_md.py" />
+              <option name="updatedContent" value="import re&#10;&#10;def strip_markdown(text):&#10;    text = re.sub(r'\*{1,2}(.*?)\*{1,2}', r'\1', text)&#10;    text = re.sub(r'_{1,2}(.*?)_{1,2}', r'\1', text)&#10;    text = re.sub(r'`(.*?)`', r'\1', text)&#10;    return text&#10;&#10;tests = [&#10;    ('**/end ticket** VM-000005', True),&#10;    ('/end ticket VM-000005', True),&#10;    ('**Some other text**', False),&#10;    ('Hello world', False),&#10;    ('__/end ticket__ VM-000005', True),&#10;    ('/End Ticket VM-000005', True),&#10;]&#10;&#10;for raw, expected in tests:&#10;    clean = strip_markdown(raw).strip().lower()&#10;    result = clean.startswith('/end ticket')&#10;    status = 'OK' if result == expected else 'FAIL'&#10;    print(f'{status} | raw={raw!r:40s} | clean={clean!r}')&#10;" />
+            </PendingDiffInfo>
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>

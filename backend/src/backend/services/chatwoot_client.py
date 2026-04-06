@@ -8,6 +8,21 @@ from typing import Any
 from urllib import error, request
 
 
+def _ticket_public_id(event_id: int) -> str:
+    """Return VM-XXXXXX ticket ID using base-36 encoding (0-9, A-Z).
+
+    Supports up to 2 176 782 335 unique ticket IDs (36^6 - 1).
+    """
+    chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    n = event_id
+    digits: list[str] = []
+    while n:
+        digits.append(chars[n % 36])
+        n //= 36
+    b36 = "".join(reversed(digits)) if digits else "0"
+    return f"VM-{b36.zfill(6)}"
+
+
 class ChatwootSupportClient:
     """Minimal Chatwoot API client for creating support conversations."""
 
@@ -149,7 +164,7 @@ class ChatwootSupportClient:
         if conversation_id <= 0:
             raise RuntimeError("Chatwoot conversation creation failed.")
 
-        public_ticket_id = f"VM-{event_id:06d}"
+        public_ticket_id = _ticket_public_id(event_id)
 
         details = [
             f"Support event ID: {event_id}",

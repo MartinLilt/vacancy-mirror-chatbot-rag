@@ -162,9 +162,27 @@ def _normalize_telegram_text(text: str) -> str:
     return value.strip()
 
 
+def _to_base36(n: int) -> str:
+    """Convert a non-negative integer to a base-36 string (digits 0-9, letters A-Z)."""
+    if n < 0:
+        raise ValueError("n must be non-negative")
+    chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if n == 0:
+        return "0"
+    result: list[str] = []
+    while n:
+        result.append(chars[n % 36])
+        n //= 36
+    return "".join(reversed(result))
+
+
 def _support_ticket_public_id(event_id: int) -> str:
-    """Build user-facing support ticket ID from internal event ID."""
-    return f"VM-{event_id:06d}"
+    """Build user-facing support ticket ID from internal event ID.
+
+    Format: VM-XXXXXX where X is a base-36 character (0-9 / A-Z).
+    Supports up to 2 176 782 335 tickets (36^6 - 1).
+    """
+    return f"VM-{_to_base36(event_id).zfill(6)}"
 
 
 # -- Keyboards -----------------------------------------------------------
@@ -221,7 +239,7 @@ async def cmd_start(
     except Exception:
         pass  # DB unavailable — treat as no subscription
 
-    # Persist Telegram profile data and sync to Google Sheets.
+    # Persist Telegram profile data.
     try:
         db_service.upsert_bot_user(
             telegram_user_id=user.id,
@@ -229,42 +247,67 @@ async def cmd_start(
             last_name=user.last_name or "",
             username=user.username or "",
         )
-        gs: GoogleSheetsService = context.bot_data["sheets"]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to upsert bot user in DB: %s", exc)
+
+    # Always sync current /start activity to Google Sheets.
+    sheet_payload = build_user_row(
+        telegram_user_id=user.id,
+        first_name=user.first_name or "",
+        last_name=user.last_name or "",
+        username=user.username or "",
+        plan=sub["plan"] if sub else "free",
+        status=sub["status"] if sub else "none",
+        stripe_customer_id=(
+            sub.get("stripe_customer_id", "")
+            if sub else ""
+        ),
+        stripe_subscription_id=(
+            sub.get("stripe_subscription_id", "")
+            if sub else ""
+        ),
+    )
+    try:
         sheet_row = db_service.get_user_for_sheet(user.id)
         if sheet_row:
-            gs.upsert_user(build_user_row(
+            sheet_payload = build_user_row(
                 telegram_user_id=user.id,
-                first_name=str(sheet_row.get("first_name", "")),
-                last_name=str(sheet_row.get("last_name", "")),
-                username=str(sheet_row.get("username", "")),
-                plan=str(sheet_row.get("plan", "free")),
-                status=str(sheet_row.get("status", "none")),
+                first_name=str(sheet_row.get("first_name", "")) or (user.first_name or ""),
+                last_name=str(sheet_row.get("last_name", "")) or (user.last_name or ""),
+                username=str(sheet_row.get("username", "")) or (user.username or ""),
+                plan=str(sheet_row.get("plan", "")) or (sub["plan"] if sub else "free"),
+                status=str(sheet_row.get("status", "")) or (sub["status"] if sub else "none"),
                 stripe_customer_id=str(
                     sheet_row.get("stripe_customer_id", "")
-                ),
-                stripe_subscription_id=str(
-                    sheet_row.get("stripe_subscription_id", "")
-                ),
-                first_seen=str(sheet_row.get("first_seen", "")),
-                last_updated=str(sheet_row.get("last_updated", "")),
-            ))
-        else:
-            gs.upsert_user(build_user_row(
-                telegram_user_id=user.id,
-                first_name=user.first_name or "",
-                last_name=user.last_name or "",
-                username=user.username or "",
-                plan=sub["plan"] if sub else "free",
-                status=sub["status"] if sub else "none",
-                stripe_customer_id=(
+                ) or (
                     sub.get("stripe_customer_id", "")
                     if sub else ""
                 ),
-                stripe_subscription_id=(
+                stripe_subscription_id=str(
+                    sheet_row.get("stripe_subscription_id", "")
+                ) or (
                     sub.get("stripe_subscription_id", "")
                     if sub else ""
                 ),
-            ))
+                # Keep historical first_seen, but refresh last_updated on every /start.
+                first_seen=str(sheet_row.get("first_seen", "")),
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to load user row for Sheets sync: %s", exc)
+
+    try:
+        gs: GoogleSheetsService = context.bot_data["sheets"]
+        synced = gs.upsert_user(sheet_payload)
+        if not synced:
+            log.warning(
+                "Sheets sync not applied for /start user_id=%s",
+                user.id,
+            )
+        else:
+            log.info(
+                "Sheets sync applied for /start user_id=%s",
+                user.id,
+            )
     except Exception as exc:  # noqa: BLE001
         log.warning("Failed to sync user to Sheets: %s", exc)
 

@@ -12,7 +12,7 @@ from backend.services.stripe_webhook import (
 
 class ChatwootWebhookHelpersTest(unittest.TestCase):
     def test_support_public_ticket_and_reply_text_format(self) -> None:
-        self.assertEqual(_support_ticket_public_id(42), "VM-000042")
+        self.assertEqual(_support_ticket_public_id(42), "VM-000016")  # 42 in base-36
         self.assertEqual(
             _support_reply_telegram_text(
                 event_id=42,
@@ -20,7 +20,7 @@ class ChatwootWebhookHelpersTest(unittest.TestCase):
             ),
             (
                 "🆘 Support reply from Vacancy Mirror:\n\n"
-                "Ticket: VM-000042\n\n"
+                "Ticket: VM-000016\n\n"
                 "Answer:\n"
                 "Thanks for your request"
             ),
@@ -30,7 +30,7 @@ class ChatwootWebhookHelpersTest(unittest.TestCase):
             (
                 "ℹ️ Ticket closed, but I could not unpin the original ticket message automatically.\n"
                 "Please unpin it manually if needed.\n\n"
-                "Ticket: VM-000042"
+                "Ticket: VM-000016"
             ),
         )
 
