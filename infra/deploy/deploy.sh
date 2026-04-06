@@ -99,9 +99,9 @@ cd /etc/vacancy-mirror
 docker compose pull backend
 docker compose pull support-webhook || true
 if docker compose config --services | grep -qx 'grafana-backend'; then
-  docker compose up -d --no-deps backend support-webhook grafana-backend nginx
+  docker compose up -d --no-deps backend support-webhook grafana-backend
 else
-  docker compose up -d --no-deps backend support-webhook nginx
+  docker compose up -d --no-deps backend support-webhook
 fi
 echo "Backend container restarted."
 docker compose logs backend --tail 20 2>&1 || true
