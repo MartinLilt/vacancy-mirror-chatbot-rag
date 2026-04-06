@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from backend.services.email_sender import SendGridEmailSender
+from backend.services.email_sender import (
+    SendGridEmailSender,
+    _render_support_email_html,
+)
 
 
 class _SpySender(SendGridEmailSender):
@@ -57,6 +60,15 @@ class EmailSenderTransportTest(unittest.TestCase):
                 smtp_host="",
                 from_email="support@vacancy-mirror.com",
             )
+
+    def test_render_support_email_html_escapes_user_content(self) -> None:
+        rendered = _render_support_email_html(
+            subject="Support <reply>",
+            text="Line 1\n<script>alert(1)</script>",
+        )
+        self.assertIn("Support &lt;reply&gt;", rendered)
+        self.assertIn("Line 1<br>&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
+        self.assertNotIn("<script>alert(1)</script>", rendered)
 
 
 if __name__ == "__main__":

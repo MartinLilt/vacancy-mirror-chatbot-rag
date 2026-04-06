@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import os
 import smtplib
+import html
 from typing import Any
 from email.message import EmailMessage
+from email.utils import formataddr
 from urllib import error, request
 
 
@@ -30,6 +32,10 @@ class SendGridEmailSender:
             "SUPPORT_FROM_EMAIL",
             "support@vacancy-mirror.com",
         )
+        self.from_name = os.getenv(
+            "SUPPORT_FROM_NAME",
+            "Vacancy Mirror Support",
+        ).strip()
         self.smtp_host = (smtp_host or os.getenv("SMTP_HOST", "")).strip()
         self.smtp_port = int(smtp_port or os.getenv("SMTP_PORT", "587"))
         self.smtp_user = (smtp_user or os.getenv("SMTP_USER", "")).strip()
@@ -88,9 +94,14 @@ class SendGridEmailSender:
             )
         message = EmailMessage()
         message["Subject"] = subject
-        message["From"] = self.from_email
+        message["From"] = formataddr((self.from_name, self.from_email))
         message["To"] = to_email
+        message["Reply-To"] = self.from_email
         message.set_content(text)
+        message.add_alternative(
+            _render_support_email_html(subject=subject, text=text),
+            subtype="html",
+        )
 
         with smtplib.SMTP(
             host=self.smtp_host,
@@ -114,9 +125,16 @@ class SendGridEmailSender:
             raise ValueError("SENDGRID_API_KEY is required for SendGrid transport.")
         body: dict[str, Any] = {
             "personalizations": [{"to": [{"email": to_email}]}],
-            "from": {"email": self.from_email},
+            "from": {"email": self.from_email, "name": self.from_name},
+            "reply_to": {"email": self.from_email, "name": self.from_name},
             "subject": subject,
-            "content": [{"type": "text/plain", "value": text}],
+            "content": [
+                {"type": "text/plain", "value": text},
+                {
+                    "type": "text/html",
+                    "value": _render_support_email_html(subject=subject, text=text),
+                },
+            ],
         }
         req = request.Request(
             url="https://api.sendgrid.com/v3/mail/send",
@@ -135,4 +153,35 @@ class SendGridEmailSender:
             raise RuntimeError(
                 f"SendGrid API error: {exc.code} {detail}"
             ) from exc
+
+
+def _render_support_email_html(*, subject: str, text: str) -> str:
+    """Render styled support email body with safe escaping."""
+    safe_subject = html.escape(subject.strip() or "Support reply")
+    safe_body = html.escape(text.strip()).replace("\n", "<br>")
+    return (
+        "<!doctype html>"
+        "<html><head><meta charset='utf-8'></head>"
+        "<body style='margin:0;padding:0;background:#f4f6f8;font-family:Arial,sans-serif;color:#111827;'>"
+        "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' style='padding:24px 12px;'>"
+        "<tr><td align='center'>"
+        "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' "
+        "style='max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;'>"
+        "<tr><td style='padding:20px 24px;border-bottom:1px solid #e5e7eb;'>"
+        "<div style='font-size:18px;font-weight:700;color:#0f172a;'>Vacancy Mirror Support</div>"
+        "<div style='margin-top:6px;font-size:14px;color:#475569;'>"
+        f"{safe_subject}"
+        "</div>"
+        "</td></tr>"
+        "<tr><td style='padding:20px 24px;font-size:15px;line-height:1.6;color:#111827;'>"
+        f"{safe_body}"
+        "</td></tr>"
+        "<tr><td style='padding:14px 24px;border-top:1px solid #e5e7eb;font-size:12px;color:#64748b;'>"
+        "Sent by support@vacancy-mirror.com. If this email appears in spam, mark it as Not Spam."
+        "</td></tr>"
+        "</table>"
+        "</td></tr></table>"
+        "</body></html>"
+    )
+
 
