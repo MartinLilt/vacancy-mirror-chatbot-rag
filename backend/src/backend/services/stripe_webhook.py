@@ -258,6 +258,15 @@ def _support_ticket_closed_telegram_text(*, event_id: int) -> str:
     )
 
 
+def _support_ticket_closed_email_text(*, event_id: int) -> str:
+    """Render support ticket closed notification for email users."""
+    return (
+        "Your support ticket has been closed.\n\n"
+        f"Ticket: {_support_ticket_public_id(event_id)}\n\n"
+        "If you still need help, please contact support again."
+    )
+
+
 def _support_ticket_unpin_failed_telegram_text(*, event_id: int) -> str:
     """Render fallback text when pinned ticket message could not be unpinned."""
     return (
@@ -620,6 +629,23 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                                 ),
                             )
                         sent_to = str(chat_id)
+                    elif channel == "email":
+                        to_email = str(event.get("reply_email", "")).strip()
+                        if not to_email:
+                            self._json_response(
+                                status=400,
+                                payload={"ok": False, "error": "reply_email_missing_for_event"},
+                            )
+                            return
+                        sender_email = SendGridEmailSender()
+                        sender_email.send_support_reply(
+                            to_email=to_email,
+                            subject="Vacancy Mirror Support Ticket Closed",
+                            text=_support_ticket_closed_email_text(
+                                event_id=event_id,
+                            ),
+                        )
+                        sent_to = to_email
 
                     self.db.upsert_support_feedback_status(
                         event_id=event_id,

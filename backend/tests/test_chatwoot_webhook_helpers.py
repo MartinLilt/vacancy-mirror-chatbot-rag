@@ -5,6 +5,7 @@ import unittest
 from backend.services.stripe_webhook import (
     _WebhookHandler,
     _support_reply_telegram_text,
+    _support_ticket_closed_email_text,
     _support_ticket_unpin_failed_telegram_text,
     _support_ticket_public_id,
 )
@@ -31,6 +32,14 @@ class ChatwootWebhookHelpersTest(unittest.TestCase):
                 "ℹ️ Ticket closed, but I could not unpin the original ticket message automatically.\n"
                 "Please unpin it manually if needed.\n\n"
                 "Ticket: VM-000016"
+            ),
+        )
+        self.assertEqual(
+            _support_ticket_closed_email_text(event_id=42),
+            (
+                "Your support ticket has been closed.\n\n"
+                "Ticket: VM-000016\n\n"
+                "If you still need help, please contact support again."
             ),
         )
 

@@ -162,6 +162,11 @@ def _normalize_telegram_text(text: str) -> str:
     return value.strip()
 
 
+def _escape_markdown_v2(text: str) -> str:
+    """Escape dynamic values for Telegram MarkdownV2 messages."""
+    return re.sub(r"([_\*\[\]\(\)~`>#+\-=|{}\.!])", r"\\\1", text)
+
+
 def _to_base36(n: int) -> str:
     """Convert a non-negative integer to a base-36 string (digits 0-9, letters A-Z)."""
     if n < 0:
@@ -1387,9 +1392,10 @@ async def sup_receive_email(
             "\n\n"
             f"Ticket ID: `{_support_ticket_public_id(event_id)}`"
         )
+    safe_email = _escape_markdown_v2(email)
     await update.message.reply_text(
         "✅ *Message sent to support\\!*\n\n"
-        f"We will reply to *{email}*\\.\n"
+        f"We will reply to *{safe_email}*\\.\n"
         "Expect a response within *3 business days*\\. ⏳"
         f"{ticket_line}",
         parse_mode=ParseMode.MARKDOWN_V2,
