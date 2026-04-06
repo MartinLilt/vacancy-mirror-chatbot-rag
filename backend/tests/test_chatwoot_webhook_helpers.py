@@ -4,6 +4,7 @@ import unittest
 
 from backend.services.stripe_webhook import (
     _WebhookHandler,
+    _support_reply_email_text,
     _support_reply_telegram_text,
     _support_ticket_closed_email_text,
     _support_ticket_unpin_failed_telegram_text,
@@ -40,6 +41,18 @@ class ChatwootWebhookHelpersTest(unittest.TestCase):
                 "Your support ticket has been closed.\n\n"
                 "Ticket: VM-000016\n\n"
                 "If you still need help, please contact support again."
+            ),
+        )
+        self.assertEqual(
+            _support_reply_email_text(
+                event_id=42,
+                answer="Thanks for your request",
+            ),
+            (
+                "Support reply from Vacancy Mirror:\n\n"
+                "Ticket: VM-000016\n\n"
+                "Answer:\n"
+                "Thanks for your request"
             ),
         )
 

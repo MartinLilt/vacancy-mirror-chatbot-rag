@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -69,6 +70,10 @@ SUP_WAITING_REPLY_CHOICE = 11
 SUP_WAITING_EMAIL = 12
 
 TRIAL_FOOTER = "\n\n—\nFree trial limit: 35 requests / 24h"
+DONATE_URL = os.environ.get(
+    "DONATE_URL",
+    "https://www.vacancy-mirror.com/pricing",
+).strip()
 PLAN_LIMITS_24H: dict[str, int] = {
     "free": 35,
     "plus": 60,
@@ -155,11 +160,49 @@ def _normalize_telegram_text(text: str) -> str:
     value = re.sub(r"(?m)^\s{2,}(?![•\-*])(\S.+)$", r"• \1", value)
     value = re.sub(r"(?m)^\s*[-*]\s+", "• ", value)
 
+    # Drop a standalone Conclusion heading if the model still emits it.
+    value = re.sub(r"(?im)^\s*conclusion\s*:\s*", "", value)
+
     # Strip any remaining HTML/XML tags to guarantee plain-text output.
     value = re.sub(r"</?[a-z0-9]+[^>]*>", "", value, flags=re.IGNORECASE)
 
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()
+
+
+def _strip_telegram_markdown(text: str) -> str:
+    """Fallback sanitizer for Telegram plain-text retries after markdown failure."""
+    value = text
+    value = re.sub(r"\*\*(.*?)\*\*", r"\1", value)
+    value = re.sub(r"__(.*?)__", r"\1", value)
+    value = re.sub(r"`([^`]*)`", r"\1", value)
+    value = re.sub(r"\[([^\]]+)\]\(([^\)]+)\)", r"\1 (\2)", value)
+    value = value.replace("*", "").replace("_", "")
+    return value
+
+
+async def _safe_edit_text(
+    message: object,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+    disable_web_page_preview: bool | None = None,
+) -> bool:
+    """Best-effort message edit that never raises.
+
+    Returns:
+        True if edit succeeded, False otherwise.
+    """
+    kwargs: dict[str, object] = {}
+    if parse_mode is not None:
+        kwargs["parse_mode"] = parse_mode
+    if disable_web_page_preview is not None:
+        kwargs["disable_web_page_preview"] = disable_web_page_preview
+    try:
+        await message.edit_text(text, **kwargs)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _escape_markdown_v2(text: str) -> str:
@@ -422,13 +465,22 @@ async def trial_receive_query(
 
     used = db.count_bot_chat_requests_last_24h(user.id)
     if used >= limit:
+        donate_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "💳 Upgrade / Donate",
+                    url=DONATE_URL,
+                )
+            ]
+        ])
         await update.message.reply_text(
             (
                 f"⛔ You reached your current limit: {limit} "
                 "requests in 24h.\n"
                 "Please try again later or upgrade your plan."
                 f"{TRIAL_FOOTER}"
-            )
+            ),
+            reply_markup=donate_keyboard,
         )
         return TRIAL_WAITING_QUERY
 
@@ -436,12 +488,31 @@ async def trial_receive_query(
         "🤖 Assistant is thinking..."
     )
 
+    last_status = ""
+    last_status_at = 0.0
+    status_lock = asyncio.Lock()
+    finalized = False
+
     async def _set_status(text: str) -> None:
-        try:
-            await thinking.edit_text(text)
-        except Exception:  # noqa: BLE001
-            # Status updates are optional UX; ignore transient edit failures.
-            pass
+        nonlocal last_status, last_status_at, finalized
+        if finalized:
+            return
+        if text == last_status:
+            return
+        async with status_lock:
+            if finalized:
+                return
+            # Telegram may reject too-frequent edits; serialize with spacing.
+            delta = time.monotonic() - last_status_at
+            if delta < 0.9:
+                await asyncio.sleep(0.9 - delta)
+            try:
+                await thinking.edit_text(text)
+                last_status = text
+                last_status_at = time.monotonic()
+            except Exception:  # noqa: BLE001
+                # Status updates are optional UX; ignore transient edit failures.
+                pass
 
     try:
         history = _get_trial_history(context)
@@ -449,6 +520,7 @@ async def trial_receive_query(
             loop = asyncio.get_running_loop()
             stage_map = {
                 "layer1_start": "🧠 Step 1/3: Understanding your request...",
+                "fast_path_start": "⚡ Fast mode: answering directly...",
                 "layer2_start": "🧭 Step 2/3: Building response plan...",
                 "layer3_start": "✍️ Step 3/3: Finalizing answer...",
             }
@@ -457,25 +529,49 @@ async def trial_receive_query(
                 text = stage_map.get(stage)
                 if not text:
                     return
-                asyncio.run_coroutine_threadsafe(
+                loop.call_soon_threadsafe(
+                    asyncio.create_task,
                     _set_status(text),
-                    loop,
                 )
 
-            result = await asyncio.to_thread(
-                orchestrator.run,
-                question=prompt,
-                history=history,
-                stage_callback=_on_stage,
+            timeout_sec = float(
+                os.environ.get("ASSISTANT_ORCHESTRATOR_TIMEOUT_SEC", "90")
+            )
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    orchestrator.run,
+                    question=prompt,
+                    history=history,
+                    stage_callback=_on_stage,
+                ),
+                timeout=timeout_sec,
             )
             answer = result.final_answer
         else:
             await _set_status("🔎 Looking for relevant context...")
-            answer = assistant.answer_market_question(question=prompt)
+            timeout_sec = float(
+                os.environ.get("ASSISTANT_SIMPLE_ANSWER_TIMEOUT_SEC", "90")
+            )
+            answer = await asyncio.wait_for(
+                asyncio.to_thread(
+                    assistant.answer_market_question,
+                    question=prompt,
+                ),
+                timeout=timeout_sec,
+            )
     except Exception as exc:  # noqa: BLE001
         log.exception("Trial chat failed: %s", exc)
         try:
-            answer = assistant.answer_market_question(question=prompt)
+            timeout_sec = float(
+                os.environ.get("ASSISTANT_SIMPLE_ANSWER_TIMEOUT_SEC", "90")
+            )
+            answer = await asyncio.wait_for(
+                asyncio.to_thread(
+                    assistant.answer_market_question,
+                    question=prompt,
+                ),
+                timeout=timeout_sec,
+            )
         except Exception as fallback_exc:  # noqa: BLE001
             log.exception("Trial chat fallback failed: %s", fallback_exc)
             await thinking.edit_text(
@@ -488,18 +584,39 @@ async def trial_receive_query(
     _append_trial_history(context, role="assistant", content=answer)
     rendered_answer = _normalize_telegram_text(answer)
 
-    try:
-        db.insert_bot_chat_request(
-            telegram_user_id=user.id,
-            plan=plan,
+    display_used = min(used + 1, limit)
+    final_text = f"{rendered_answer}\n\n—\nUsed {display_used}/{limit}"
+    finalized = True
+    ok = await _safe_edit_text(
+        thinking,
+        final_text,
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True,
+    )
+    if not ok:
+        ok = await _safe_edit_text(
+            thinking,
+            _strip_telegram_markdown(final_text),
+            disable_web_page_preview=True,
         )
-        used += 1
+    if not ok:
+        await update.message.reply_text(
+            _strip_telegram_markdown(final_text),
+            disable_web_page_preview=True,
+        )
+
+    # Log usage after user has already received an answer.
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                db.insert_bot_chat_request,
+                telegram_user_id=user.id,
+                plan=plan,
+            ),
+            timeout=float(os.environ.get("BOT_USAGE_LOG_TIMEOUT_SEC", "5")),
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("Failed to log trial chat usage: %s", exc)
-
-    await thinking.edit_text(
-        f"{rendered_answer}\n\n—\nUsed {used}/{limit}"
-    )
     return TRIAL_WAITING_QUERY
 
 

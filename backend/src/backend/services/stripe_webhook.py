@@ -250,6 +250,16 @@ def _support_reply_telegram_text(*, event_id: int, answer: str) -> str:
     )
 
 
+def _support_reply_email_text(*, event_id: int, answer: str) -> str:
+    """Render support reply text sent to email users."""
+    return (
+        "Support reply from Vacancy Mirror:\n\n"
+        f"Ticket: {_support_ticket_public_id(event_id)}\n\n"
+        "Answer:\n"
+        f"{answer.strip()}"
+    )
+
+
 def _support_ticket_closed_telegram_text(*, event_id: int) -> str:
     """Render support ticket closed notification for Telegram users."""
     return (
@@ -645,6 +655,39 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                                 event_id=event_id,
                             ),
                         )
+                        chat_id = int(event["telegram_user_id"])
+                        telegram_message_id = int(
+                            event.get("telegram_message_id", 0) or 0
+                        )
+                        _send_telegram_message(
+                            token=self.token,
+                            chat_id=chat_id,
+                            text=_support_ticket_closed_telegram_text(
+                                event_id=event_id,
+                            ),
+                            raise_on_error=True,
+                        )
+                        unpinned = _unpin_telegram_message(
+                            token=self.token,
+                            chat_id=chat_id,
+                            message_id=telegram_message_id,
+                        )
+                        if not unpinned:
+                            log.warning(
+                                "%s event_id=%s chat_id=%s telegram_message_id=%s chatwoot_message_id=%s",
+                                _SUPPORT_UNPIN_FAILED_MARKER,
+                                event_id,
+                                chat_id,
+                                telegram_message_id,
+                                message_id,
+                            )
+                            _send_telegram_message(
+                                token=self.token,
+                                chat_id=chat_id,
+                                text=_support_ticket_unpin_failed_telegram_text(
+                                    event_id=event_id,
+                                ),
+                            )
                         sent_to = to_email
 
                     self.db.upsert_support_feedback_status(
@@ -759,7 +802,10 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                     sender_email.send_support_reply(
                         to_email=to_email,
                         subject="Vacancy Mirror Support Reply",
-                        text=reply_text,
+                        text=_support_reply_email_text(
+                            event_id=event_id,
+                            answer=reply_text,
+                        ),
                     )
                     sent_to = to_email
                 else:
@@ -885,7 +931,10 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                     sender.send_support_reply(
                         to_email=to_email,
                         subject="Vacancy Mirror Support Reply",
-                        text=reply_text,
+                        text=_support_reply_email_text(
+                            event_id=event_id,
+                            answer=reply_text,
+                        ),
                     )
                     sent_to = to_email
 
