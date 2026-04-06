@@ -772,6 +772,7 @@ class PostgresJobExportService:
         CREATE TABLE IF NOT EXISTS support_feedback_events (
             id BIGSERIAL PRIMARY KEY,
             telegram_user_id BIGINT NOT NULL,
+            telegram_message_id BIGINT NOT NULL DEFAULT 0,
             telegram_username TEXT NOT NULL DEFAULT '',
             telegram_full_name TEXT NOT NULL DEFAULT '',
             reply_channel TEXT NOT NULL, -- telegram | email | none
@@ -784,6 +785,8 @@ class PostgresJobExportService:
             chatwoot_contact_id BIGINT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE support_feedback_events
+            ADD COLUMN IF NOT EXISTS telegram_message_id BIGINT NOT NULL DEFAULT 0;
         ALTER TABLE support_feedback_events
             ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'new';
         ALTER TABLE support_feedback_events
@@ -849,6 +852,7 @@ class PostgresJobExportService:
         telegram_full_name: str,
         reply_channel: str,
         feedback_message: str,
+        telegram_message_id: int = 0,
         reply_email: str = "",
     ) -> int:
         """Insert one support feedback event and return its ID."""
@@ -856,6 +860,7 @@ class PostgresJobExportService:
         sql = """
         INSERT INTO support_feedback_events (
             telegram_user_id,
+            telegram_message_id,
             telegram_username,
             telegram_full_name,
             reply_channel,
@@ -864,6 +869,7 @@ class PostgresJobExportService:
             status
         ) VALUES (
             %(telegram_user_id)s,
+            %(telegram_message_id)s,
             %(telegram_username)s,
             %(telegram_full_name)s,
             %(reply_channel)s,
@@ -877,6 +883,7 @@ class PostgresJobExportService:
             with conn.cursor() as cur:
                 cur.execute(sql, {
                     "telegram_user_id": telegram_user_id,
+                    "telegram_message_id": max(0, int(telegram_message_id)),
                     "telegram_username": telegram_username or "",
                     "telegram_full_name": telegram_full_name or "",
                     "reply_channel": reply_channel,
@@ -929,6 +936,7 @@ class PostgresJobExportService:
             id,
             created_at,
             telegram_user_id,
+            telegram_message_id,
             telegram_username,
             telegram_full_name,
             reply_channel,
@@ -966,6 +974,7 @@ class PostgresJobExportService:
             id,
             created_at,
             telegram_user_id,
+            telegram_message_id,
             telegram_username,
             telegram_full_name,
             reply_channel,
@@ -1000,6 +1009,7 @@ class PostgresJobExportService:
             id,
             created_at,
             telegram_user_id,
+            telegram_message_id,
             telegram_username,
             telegram_full_name,
             reply_channel,

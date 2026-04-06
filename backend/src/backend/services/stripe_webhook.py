@@ -38,6 +38,7 @@ from backend.services.google_sheets import (
 from backend.services.postgres import PostgresJobExportService
 
 log = logging.getLogger(__name__)
+_SUPPORT_UNPIN_FAILED_MARKER = "SUPPORT_TICKET_UNPIN_FAILED"
 
 # Plan name mapping from Stripe product/price metadata to internal name
 _PLAN_BY_STRIPE_PRICE: dict[str, str] = {}  # populated at runtime
@@ -131,6 +132,47 @@ def _send_telegram_message(
             raise
 
 
+def _unpin_telegram_message(
+    token: str,
+    chat_id: int,
+    message_id: int,
+    *,
+    raise_on_error: bool = False,
+) -> bool:
+    """Unpin one Telegram message by message_id.
+
+    Returns:
+        True when unpin succeeds or when message_id is not set.
+        False when Telegram API call fails.
+    """
+    if message_id <= 0:
+        return True
+    url = f"https://api.telegram.org/bot{token}/unpinChatMessage"
+    payload = json.dumps(
+        {"chat_id": chat_id, "message_id": message_id}
+    ).encode()
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            log.debug("Telegram unpinChatMessage status: %s", resp.status)
+            return True
+    except Exception as exc:
+        log.warning(
+            "Failed to unpin Telegram message %s for chat %s: %s",
+            message_id,
+            chat_id,
+            exc,
+        )
+        if raise_on_error:
+            raise
+        return False
+
+
 def _verify_stripe_signature(
     payload: bytes,
     sig_header: str,
@@ -164,6 +206,38 @@ def _verify_stripe_signature(
         return hmac.compare_digest(expected, signature)
     except Exception:
         return False
+
+
+def _support_ticket_public_id(event_id: int) -> str:
+    """Build user-facing support ticket ID from internal event ID."""
+    return f"VM-{event_id:06d}"
+
+
+def _support_reply_telegram_text(*, event_id: int, answer: str) -> str:
+    """Render support reply text sent to Telegram users."""
+    return (
+        "🆘 Support reply from Vacancy Mirror:\n\n"
+        f"Ticket: {_support_ticket_public_id(event_id)}\n\n"
+        "Answer:\n"
+        f"{answer.strip()}"
+    )
+
+
+def _support_ticket_closed_telegram_text(*, event_id: int) -> str:
+    """Render support ticket closed notification for Telegram users."""
+    return (
+        "✅ Support ticket closed.\n\n"
+        f"Ticket: {_support_ticket_public_id(event_id)}"
+    )
+
+
+def _support_ticket_unpin_failed_telegram_text(*, event_id: int) -> str:
+    """Render fallback text when pinned ticket message could not be unpinned."""
+    return (
+        "ℹ️ Ticket closed, but I could not unpin the original ticket message automatically.\n"
+        "Please unpin it manually if needed.\n\n"
+        f"Ticket: {_support_ticket_public_id(event_id)}"
+    )
 
 
 class _WebhookHandler(http.server.BaseHTTPRequestHandler):
@@ -296,6 +370,14 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                 return False
         return True
 
+    @staticmethod
+    def _chatwoot_is_private_close_command(payload: dict[str, Any]) -> bool:
+        """Return True for private notes that close a support ticket."""
+        if not bool(payload.get("private", False)):
+            return False
+        content = _WebhookHandler._chatwoot_message_content(payload)
+        return content.strip().lower().startswith("/end ticket")
+
     def _resolve_feedback_event_from_chatwoot(
         self,
         *,
@@ -413,7 +495,9 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         """Handle POST /webhook from Stripe."""
-        if self.path == "/support/chatwoot/webhook":
+        request_path = urllib.parse.urlparse(self.path).path
+
+        if request_path == "/support/chatwoot/webhook":
             if not self._is_chatwoot_authorized():
                 self._json_response(
                     status=401,
@@ -429,14 +513,126 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                 )
                 return
 
+            message_id = self._chatwoot_message_id(body)
+
+            if self._chatwoot_is_private_close_command(body):
+                if (
+                    message_id
+                    and self.db.support_reply_exists_by_external_message_id(
+                        external_message_id=message_id
+                    )
+                ):
+                    self._json_response(
+                        status=200,
+                        payload={"ok": True, "ignored": "duplicate_message"},
+                    )
+                    return
+
+                event = self._resolve_feedback_event_from_chatwoot(payload=body)
+                if not event:
+                    self._json_response(
+                        status=404,
+                        payload={"ok": False, "error": "support_event_not_found"},
+                    )
+                    return
+
+                event_id = int(event["id"])
+                sender = body.get("sender")
+                operator_name = ""
+                if isinstance(sender, dict):
+                    operator_name = str(sender.get("name", "")).strip()
+
+                channel = str(event.get("reply_channel", "")).strip().lower()
+                sent_to = ""
+                try:
+                    if channel == "telegram":
+                        chat_id = int(event["telegram_user_id"])
+                        telegram_message_id = int(
+                            event.get("telegram_message_id", 0) or 0
+                        )
+                        _send_telegram_message(
+                            token=self.token,
+                            chat_id=chat_id,
+                            text=_support_ticket_closed_telegram_text(
+                                event_id=event_id,
+                            ),
+                            raise_on_error=True,
+                        )
+                        unpinned = _unpin_telegram_message(
+                            token=self.token,
+                            chat_id=chat_id,
+                            message_id=telegram_message_id,
+                        )
+                        if not unpinned:
+                            log.warning(
+                                "%s event_id=%s chat_id=%s telegram_message_id=%s chatwoot_message_id=%s",
+                                _SUPPORT_UNPIN_FAILED_MARKER,
+                                event_id,
+                                chat_id,
+                                telegram_message_id,
+                                message_id,
+                            )
+                            _send_telegram_message(
+                                token=self.token,
+                                chat_id=chat_id,
+                                text=_support_ticket_unpin_failed_telegram_text(
+                                    event_id=event_id,
+                                ),
+                            )
+                        sent_to = str(chat_id)
+
+                    self.db.upsert_support_feedback_status(
+                        event_id=event_id,
+                        status="closed",
+                        assigned_to=operator_name,
+                    )
+
+                    if channel in {"telegram", "email"}:
+                        self.db.insert_support_reply(
+                            feedback_event_id=event_id,
+                            channel=channel,
+                            sent_to=sent_to,
+                            reply_text="Ticket closed by support.",
+                            operator_name=operator_name,
+                            status="sent",
+                            source="chatwoot",
+                            external_message_id=message_id,
+                        )
+
+                    self._json_response(
+                        status=200,
+                        payload={
+                            "ok": True,
+                            "event_id": event_id,
+                            "status": "closed",
+                            "sent_to": sent_to,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if channel in {"telegram", "email"}:
+                        self.db.insert_support_reply(
+                            feedback_event_id=event_id,
+                            channel=channel,
+                            sent_to=sent_to,
+                            reply_text="Ticket closed by support.",
+                            operator_name=operator_name,
+                            status="failed",
+                            source="chatwoot",
+                            external_message_id=message_id,
+                            error_message=str(exc),
+                        )
+                    self._json_response(
+                        status=500,
+                        payload={"ok": False, "error": f"close_failed: {exc}"},
+                    )
+                return
+
             if not self._chatwoot_is_public_agent_reply(body):
                 self._json_response(
                     status=200,
                     payload={"ok": True, "ignored": "not_agent_public_reply"},
                 )
                 return
-
-            message_id = self._chatwoot_message_id(body)
             if (
                 message_id
                 and self.db.support_reply_exists_by_external_message_id(
@@ -478,9 +674,9 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                     _send_telegram_message(
                         token=self.token,
                         chat_id=chat_id,
-                        text=(
-                            "Support reply from Vacancy Mirror:\n\n"
-                            f"{reply_text}"
+                        text=_support_reply_telegram_text(
+                            event_id=event_id,
+                            answer=reply_text,
                         ),
                         raise_on_error=True,
                     )
@@ -548,7 +744,7 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                 )
             return
 
-        if self.path == "/support/reply":
+        if request_path == "/support/reply":
             if not self._is_support_authorized():
                 self._json_response(
                     status=401,
@@ -604,9 +800,9 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                     _send_telegram_message(
                         token=self.token,
                         chat_id=chat_id,
-                        text=(
-                            "Support reply from Vacancy Mirror:\n\n"
-                            f"{reply_text}"
+                        text=_support_reply_telegram_text(
+                            event_id=event_id,
+                            answer=reply_text,
                         ),
                         raise_on_error=True,
                     )
@@ -666,7 +862,7 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
                 )
             return
 
-        if self.path == "/support/status":
+        if request_path == "/support/status":
             if not self._is_support_authorized():
                 self._json_response(
                     status=401,
@@ -709,7 +905,7 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
-        if self.path != "/webhook":
+        if request_path != "/webhook":
             self.send_response(404)
             self.end_headers()
             return

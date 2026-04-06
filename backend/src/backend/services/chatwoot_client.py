@@ -110,9 +110,23 @@ class ChatwootSupportClient:
             path="contacts",
             payload=contact_payload,
         )
-        contact_id = int(contact.get("id", 0))
+        contact_id_raw = contact.get("id", 0)
+        if not contact_id_raw:
+            payload = contact.get("payload")
+            if isinstance(payload, dict):
+                contact_obj = payload.get("contact")
+                if isinstance(contact_obj, dict):
+                    contact_id_raw = contact_obj.get("id", 0)
+        contact_id = int(contact_id_raw or 0)
         if contact_id <= 0:
             raise RuntimeError("Chatwoot contact creation failed.")
+
+        source_id = ""
+        payload = contact.get("payload")
+        if isinstance(payload, dict):
+            contact_inbox = payload.get("contact_inbox")
+            if isinstance(contact_inbox, dict):
+                source_id = str(contact_inbox.get("source_id", "")).strip()
 
         conversation = self._request_json(
             method="POST",
@@ -120,6 +134,7 @@ class ChatwootSupportClient:
             payload={
                 "contact_id": contact_id,
                 "inbox_id": self.inbox_id,
+                "source_id": source_id,
                 "status": "open",
                 "custom_attributes": {
                     "support_event_id": str(event_id),
@@ -134,14 +149,23 @@ class ChatwootSupportClient:
         if conversation_id <= 0:
             raise RuntimeError("Chatwoot conversation creation failed.")
 
+        public_ticket_id = f"VM-{event_id:06d}"
+
         details = [
             f"Support event ID: {event_id}",
+            f"Public ticket ID: {public_ticket_id}",
             f"Reply channel: {reply_channel}",
             f"Telegram user ID: {telegram_user_id}",
             f"Telegram username: {telegram_username or '—'}",
         ]
         if reply_email:
             details.append(f"Reply email: {reply_email}")
+        details.extend([
+            "",
+            "Operator notes:",
+            "- Send a PUBLIC reply to deliver message to user.",
+            "- Add PRIVATE note `/end ticket ...` to close ticket and notify user.",
+        ])
         content = (
             "New support request from Telegram bot.\n\n"
             + "\n".join(details)

@@ -162,6 +162,11 @@ def _normalize_telegram_text(text: str) -> str:
     return value.strip()
 
 
+def _support_ticket_public_id(event_id: int) -> str:
+    """Build user-facing support ticket ID from internal event ID."""
+    return f"VM-{event_id:06d}"
+
+
 # -- Keyboards -----------------------------------------------------------
 
 def _start_keyboard() -> InlineKeyboardMarkup:
@@ -957,6 +962,25 @@ def _support_username(user: object) -> str:
     return raw if raw.startswith("@") else f"@{raw}"
 
 
+async def _pin_support_ticket_message(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+) -> None:
+    """Pin original user support message; ignore Telegram pin limitations."""
+    if message_id <= 0:
+        return
+    try:
+        await context.bot.pin_chat_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            disable_notification=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to pin support ticket message %s: %s", message_id, exc)
+
+
 async def cb_privacy(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1152,6 +1176,7 @@ async def sup_receive_message(
 ) -> int:
     """Store the user's support message and ask reply preference."""
     context.user_data["sup_message"] = update.message.text.strip()
+    context.user_data["sup_message_id"] = int(update.message.message_id or 0)
     await update.message.reply_text(
         "📬 *Do you need a reply from support?*\n\n"
         "If yes — choose how you'd like to receive it\\.\n\n"
@@ -1172,6 +1197,7 @@ async def sup_reply_tg(
     await query.answer()
     event_id: int | None = None
     message_text = str(context.user_data.get("sup_message", "")).strip()
+    support_message_id = int(context.user_data.get("sup_message_id", 0) or 0)
     try:
         db: PostgresJobExportService = context.bot_data["db"]
         event_id = db.insert_support_feedback_event(
@@ -1180,6 +1206,7 @@ async def sup_reply_tg(
             telegram_full_name=update.effective_user.full_name or "",
             reply_channel="telegram",
             feedback_message=message_text,
+            telegram_message_id=support_message_id,
         )
         try:
             client = ChatwootSupportClient()
@@ -1213,13 +1240,27 @@ async def sup_reply_tg(
             extra=None,
         )
 
+    ticket_line = ""
+    if event_id is not None and event_id > 0:
+        ticket_line = (
+            "\n\n"
+            f"Ticket ID: `{_support_ticket_public_id(event_id)}`"
+        )
+
     await query.message.reply_text(
         "✅ *Message sent to support\\!*\n\n"
         "We will reply to you here in Telegram\\.\n"
-        "Expect a response within *3 business days*\\. ⏳",
+        "Expect a response within *3 business days*\\. ⏳"
+        f"{ticket_line}",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
+    await _pin_support_ticket_message(
+        context=context,
+        chat_id=update.effective_chat.id,
+        message_id=support_message_id,
+    )
     context.user_data.pop("sup_message", None)
+    context.user_data.pop("sup_message_id", None)
     return ConversationHandler.END
 
 
@@ -1252,6 +1293,7 @@ async def sup_receive_email(
 
     event_id: int | None = None
     message_text = str(context.user_data.get("sup_message", "")).strip()
+    support_message_id = int(context.user_data.get("sup_message_id", 0) or 0)
     try:
         db: PostgresJobExportService = context.bot_data["db"]
         event_id = db.insert_support_feedback_event(
@@ -1261,6 +1303,7 @@ async def sup_receive_email(
             reply_channel="email",
             reply_email=email,
             feedback_message=message_text,
+            telegram_message_id=support_message_id,
         )
         try:
             client = ChatwootSupportClient()
@@ -1295,13 +1338,26 @@ async def sup_receive_email(
             extra=email,
         )
 
+    ticket_line = ""
+    if event_id is not None and event_id > 0:
+        ticket_line = (
+            "\n\n"
+            f"Ticket ID: `{_support_ticket_public_id(event_id)}`"
+        )
     await update.message.reply_text(
         "✅ *Message sent to support\\!*\n\n"
         f"We will reply to *{email}*\\.\n"
-        "Expect a response within *3 business days*\\. ⏳",
+        "Expect a response within *3 business days*\\. ⏳"
+        f"{ticket_line}",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
+    await _pin_support_ticket_message(
+        context=context,
+        chat_id=update.effective_chat.id,
+        message_id=support_message_id,
+    )
     context.user_data.pop("sup_message", None)
+    context.user_data.pop("sup_message_id", None)
     return ConversationHandler.END
 
 
@@ -1312,7 +1368,9 @@ async def sup_no_reply(
     """User does not need a reply — forward to admin and finish."""
     query = update.callback_query
     await query.answer()
+    event_id: int | None = None
     message_text = str(context.user_data.get("sup_message", "")).strip()
+    support_message_id = int(context.user_data.get("sup_message_id", 0) or 0)
     try:
         db: PostgresJobExportService = context.bot_data["db"]
         event_id = db.insert_support_feedback_event(
@@ -1321,6 +1379,7 @@ async def sup_no_reply(
             telegram_full_name=update.effective_user.full_name or "",
             reply_channel="none",
             feedback_message=message_text,
+            telegram_message_id=support_message_id,
         )
         try:
             client = ChatwootSupportClient()
@@ -1354,12 +1413,25 @@ async def sup_no_reply(
             extra=None,
         )
 
+    ticket_line = ""
+    if event_id is not None and event_id > 0:
+        ticket_line = (
+            "\n\n"
+            f"Ticket ID: `{_support_ticket_public_id(event_id)}`"
+        )
     await query.message.reply_text(
         "✅ *Message sent to support\\!*\n\n"
-        "Thank you for your feedback\\. 🙏",
+        "Thank you for your feedback\\. 🙏"
+        f"{ticket_line}",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
+    await _pin_support_ticket_message(
+        context=context,
+        chat_id=update.effective_chat.id,
+        message_id=support_message_id,
+    )
     context.user_data.pop("sup_message", None)
+    context.user_data.pop("sup_message_id", None)
     return ConversationHandler.END
 
 

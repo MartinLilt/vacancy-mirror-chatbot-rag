@@ -1,0 +1,57 @@
+services:
+  chatwoot-postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DATABASE}
+      POSTGRES_USER: ${POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - chatwoot-postgres-data:/var/lib/postgresql/data
+
+  chatwoot-redis:
+    image: redis:7
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - chatwoot-redis-data:/data
+
+  chatwoot-rails:
+    image: chatwoot/chatwoot:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - chatwoot-postgres
+      - chatwoot-redis
+    command: bundle exec rails s -p 3000 -b 0.0.0.0
+    ports:
+      - "127.0.0.1:3002:3000"
+    networks:
+      - default
+      - vacancy-mirror
+
+  chatwoot-sidekiq:
+    image: chatwoot/chatwoot:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - chatwoot-postgres
+      - chatwoot-redis
+    command: bundle exec sidekiq -C config/sidekiq.yml
+    networks:
+      - default
+      - vacancy-mirror
+
+volumes:
+  chatwoot-postgres-data:
+  chatwoot-redis-data:
+
+networks:
+  vacancy-mirror:
+    external: true
+    name: vacancy-mirror_default
+
