@@ -62,6 +62,33 @@ FLARESOLVERR_TIMEOUT_BACKOFF_MULT=1.8
 FLARESOLVERR_ROTATE_AFTER_TIMEOUTS=2
 ```
 
+Backend runtime env on server (`/etc/vacancy-mirror/backend.env`) for infer scaling:
+
+```dotenv
+ASSISTANT_INFER_URLS=http://assistant-infer-1:8090,http://assistant-infer-2:8090,http://assistant-infer-3:8090
+ASSISTANT_REMOTE_TIMEOUT_SEC=70
+ASSISTANT_INFER_MAX_CONCURRENCY=24
+ASSISTANT_GLOBAL_CONCURRENCY=64
+ASSISTANT_GLOBAL_ACQUIRE_TIMEOUT_SEC=0.2
+ASSISTANT_PER_USER_GUARD_ENABLED=1
+```
+
+## Backend Assistant Scaling (Current)
+
+On backend server `178.104.113.58`, assistant traffic is split into two layers:
+
+1. `backend` (Telegram bot) handles chat state, limits, support flows, and routing.
+2. `assistant-infer-1/2/3` are stateless HTTP infer workers (`/v1/answer`, `/health`).
+
+Flow:
+
+- Bot receives user message.
+- Bot sends request to `ASSISTANT_INFER_URLS` via round-robin + failover.
+- If all replicas fail, bot falls back to local assistant/orchestrator path.
+- Runtime counters are visible via Telegram command `/assistant_metrics`.
+
+This keeps UX responsive under load while preserving backward-compatible fallback.
+
 Server 2 compose (`infra/deploy/docker-compose.server2.yml`) already maps:
 
 - `flaresolverr.environment.PROXY_URL: ${FLARESOLVERR_PROXY_URL:-}`
@@ -109,6 +136,19 @@ Or step-by-step backend:
 ```bash
 bash infra/deploy/push-images.sh backend
 bash infra/deploy/deploy.sh backend
+```
+
+Important for Apple Silicon operators: do not publish backend image with plain `docker build` (it can produce arm64-only image and fail on amd64 server with `exec format error`). Use `ship.sh`/`push-images.sh`, which already build with `--platform linux/amd64`.
+
+After backend deploy, verify infer replicas are included:
+
+```bash
+ssh -i ~/.ssh/vacancy_mirror_deploy root@178.104.113.58
+cd /etc/vacancy-mirror
+docker compose ps backend support-webhook assistant-infer-1 assistant-infer-2 assistant-infer-3
+docker compose logs assistant-infer-1 --tail 20
+docker compose logs assistant-infer-2 --tail 20
+docker compose logs assistant-infer-3 --tail 20
 ```
 
 Scraper deploy (only if scraper incident):
@@ -205,6 +245,15 @@ curl -s http://localhost:8191/health
 ## Quick Health Checklist
 
 ```bash
+# On backend server
+ssh -i ~/.ssh/vacancy_mirror_deploy root@178.104.113.58
+cd /etc/vacancy-mirror
+docker compose ps backend support-webhook assistant-infer-1 assistant-infer-2 assistant-infer-3
+docker compose logs backend --tail 30
+docker compose logs assistant-infer-1 --tail 20
+docker compose logs assistant-infer-2 --tail 20
+docker compose logs assistant-infer-3 --tail 20
+
 # On scraper server
 cd /etc/vacancy-mirror
 docker compose ps
@@ -214,6 +263,18 @@ curl -s http://localhost:8191/health
 
 docker exec scraper python3 -c 'import scraper; print("ok")'
 ```
+
+## Backend Deploy Failure Signatures (Known)
+
+If infer replicas restart-loop after deploy, check these common causes first:
+
+- `invalid choice: 'assistant-infer'`
+  - Cause: server pulled old backend image without new CLI command.
+  - Fix: rebuild + push backend image, then redeploy backend stack.
+
+- `exec /usr/local/bin/python: exec format error`
+  - Cause: arm64 image published, but backend host is amd64.
+  - Fix: publish `linux/amd64` image (or multi-arch) and redeploy.
 
 If all checks pass, scraper can be started safely from the console/UI.
 

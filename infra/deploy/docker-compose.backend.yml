@@ -43,6 +43,39 @@ services:
         condition: service_healthy
     command: python -m backend.cli telegram-bot
 
+  # Horizontal assistant inference replicas.
+  # Backend can call them via:
+  # ASSISTANT_INFER_URLS=http://assistant-infer-1:8090,http://assistant-infer-2:8090,http://assistant-infer-3:8090
+  assistant-infer-1:
+    image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
+    restart: unless-stopped
+    env_file:
+      - /etc/vacancy-mirror/backend.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m backend.cli assistant-infer --port 8090
+
+  assistant-infer-2:
+    image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
+    restart: unless-stopped
+    env_file:
+      - /etc/vacancy-mirror/backend.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m backend.cli assistant-infer --port 8090
+
+  assistant-infer-3:
+    image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
+    restart: unless-stopped
+    env_file:
+      - /etc/vacancy-mirror/backend.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m backend.cli assistant-infer --port 8090
+
   support-webhook:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
     restart: unless-stopped

@@ -30,6 +30,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from telegram import (
@@ -54,6 +55,7 @@ from backend.services.google_sheets import (
     build_user_row,
 )
 from backend.services.chatwoot_client import ChatwootSupportClient
+from backend.services.assistant_infer_client import AssistantInferClient
 from backend.services.openai import OpenAIMarketAssistantService
 from backend.services.postgres import PostgresJobExportService
 from backend.services.reasoning_orchestrator import ReasoningOrchestrator
@@ -115,6 +117,76 @@ def _env_flag(name: str, default: str = "1") -> bool:
     """Parse bool-like env flags such as 1/0, true/false, yes/no."""
     raw = os.environ.get(name, default).strip().lower()
     return raw not in {"0", "false", "no", "off"}
+
+
+def _env_int(name: str, default: int) -> int:
+    """Parse integer env var with safe fallback."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse float env var with safe fallback."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+@dataclass(slots=True)
+class AssistantRuntimeState:
+    """In-process assistant concurrency guards and lightweight counters."""
+
+    max_concurrency: int
+    semaphore: asyncio.Semaphore = field(init=False)
+    user_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
+    active: int = 0
+    completed: int = 0
+    failed: int = 0
+    overload_rejections: int = 0
+    user_busy_rejections: int = 0
+    route_fast_path: int = 0
+    route_long_path: int = 0
+    route_simple: int = 0
+    total_latency_sec: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.max_concurrency = max(1, int(self.max_concurrency))
+        self.semaphore = asyncio.Semaphore(self.max_concurrency)
+
+    def lock_for_user(self, user_id: int) -> asyncio.Lock:
+        lock = self.user_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.user_locks[user_id] = lock
+        return lock
+
+    def snapshot(self) -> dict[str, float | int]:
+        total_handled = self.completed + self.failed
+        avg_latency = (
+            (self.total_latency_sec / total_handled)
+            if total_handled > 0 else 0.0
+        )
+        return {
+            "max_concurrency": self.max_concurrency,
+            "active": self.active,
+            "completed": self.completed,
+            "failed": self.failed,
+            "overload_rejections": self.overload_rejections,
+            "user_busy_rejections": self.user_busy_rejections,
+            "route_fast_path": self.route_fast_path,
+            "route_long_path": self.route_long_path,
+            "route_simple": self.route_simple,
+            "avg_latency_sec": round(avg_latency, 3),
+        }
 
 
 def _get_trial_history(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, str]]:
@@ -263,6 +335,68 @@ def _start_keyboard() -> InlineKeyboardMarkup:
 
 # -- Handlers ------------------------------------------------------------
 
+def _schedule_text() -> str:
+    """Human-readable weekly reports schedule shown in /schedule and /start."""
+    return (
+        "📅 *Reports schedule*\n\n"
+        "Monday — Top Trends chart \\(Free\\)\n"
+        "Tuesday — Top 10 Roles \\(Plus\\)\n"
+        "Wednesday — Top 20 Technologies \\(Plus\\)\n"
+        "Thursday — Top 10 Profile Optimisation Tips \\(Free\\)\n"
+        "Friday — Top 20 Skills \\(Free\\)"
+    )
+
+
+async def cmd_schedule(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Handle /schedule — show report calendar and format."""
+    allowed: set[int] = context.bot_data["allowed_ids"]
+    user = update.effective_user
+    if not _is_allowed(user.id, allowed):
+        return
+    await update.message.reply_text(
+        _schedule_text(),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        disable_web_page_preview=True,
+    )
+
+
+async def cmd_assistant_metrics(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Handle /assistant_metrics — show runtime load counters."""
+    allowed: set[int] = context.bot_data["allowed_ids"]
+    user = update.effective_user
+    if not _is_allowed(user.id, allowed):
+        return
+
+    runtime: AssistantRuntimeState | None = context.bot_data.get(
+        "assistant_runtime"
+    )
+    if runtime is None:
+        await update.message.reply_text("Assistant runtime metrics are not initialized.")
+        return
+
+    snapshot = runtime.snapshot()
+    text = (
+        "Assistant runtime metrics\n\n"
+        f"active: {snapshot['active']}/{snapshot['max_concurrency']}\n"
+        f"completed: {snapshot['completed']}\n"
+        f"failed: {snapshot['failed']}\n"
+        f"overload_rejections: {snapshot['overload_rejections']}\n"
+        f"user_busy_rejections: {snapshot['user_busy_rejections']}\n"
+        f"routes fast/long/simple: "
+        f"{snapshot['route_fast_path']}/"
+        f"{snapshot['route_long_path']}/"
+        f"{snapshot['route_simple']}\n"
+        f"avg_latency_sec: {snapshot['avg_latency_sec']}"
+    )
+    await update.message.reply_text(text)
+
+
 async def cmd_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -393,10 +527,17 @@ async def cmd_start(
             "Publicly available job listings, Upwork market trends,\n"
             "Google search trends \\& aggregated market signals\\.\n\n"
 
+            "🧪 *Coming soon: Pro Plus subscription*\n"
+            "Pro Plus is launching soon and will unlock maximum market coverage:\n"
+            "🚀 Extended Projects Agent \\(up to 12 projects\\)\n"
+            "🏷️ Weekly Skills \\& Tags intelligence report\n"
+            "⚡ Priority access to advanced market intelligence modules\n\n"
+
             "⌨️ *Commands:*\n"
             "/start — main menu\n"
             "/search — semantic job search\n"
             "/stats — market stats\n"
+            "/schedule — reports schedule\n"
             "/help — show this message\n\n"
 
             "🚀 *Ready to explore?*\n"
@@ -407,6 +548,11 @@ async def cmd_start(
         text,
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=_start_keyboard(),
+    )
+    await update.message.reply_text(
+        _schedule_text(),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        disable_web_page_preview=True,
     )
 
 
@@ -460,172 +606,264 @@ async def trial_receive_query(
     orchestrator: ReasoningOrchestrator | None = context.bot_data.get(
         "assistant_orchestrator"
     )
-
-    plan = "free"
-    limit = PLAN_LIMITS_24H["free"]
-    try:
-        sub = db.get_subscription(user.id)
-        if sub and sub.get("status") == "active":
-            plan = str(sub.get("plan", "free"))
-            limit = PLAN_LIMITS_24H.get(plan, PLAN_LIMITS_24H["free"])
-    except Exception:  # noqa: BLE001
-        pass
-
-    used = db.count_bot_chat_requests_last_24h(user.id)
-    if used >= limit:
-        donate_keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "💳 Upgrade / Donate",
-                    url=DONATE_URL,
-                )
-            ]
-        ])
-        await update.message.reply_text(
-            (
-                f"⛔ You reached your current limit: {limit} "
-                "requests in 24h.\n"
-                "Please try again later or upgrade your plan."
-                f"{TRIAL_FOOTER}"
-            ),
-            reply_markup=donate_keyboard,
-        )
-        return TRIAL_WAITING_QUERY
-
-    thinking = await update.message.reply_text(
-        "🤖 Assistant is thinking..."
+    infer_client: AssistantInferClient | None = context.bot_data.get(
+        "assistant_infer_client"
+    )
+    remote_timeout_sec: float = float(
+        context.bot_data.get("assistant_remote_timeout_sec", 70.0)
+    )
+    runtime: AssistantRuntimeState = context.bot_data["assistant_runtime"]
+    per_user_guard_enabled: bool = context.bot_data.get(
+        "assistant_per_user_guard_enabled",
+        True,
+    )
+    acquire_timeout_sec: float = context.bot_data.get(
+        "assistant_acquire_timeout_sec",
+        0.2,
     )
 
-    last_status = ""
-    last_status_at = 0.0
-    status_lock = asyncio.Lock()
-    finalized = False
-
-    async def _set_status(text: str) -> None:
-        nonlocal last_status, last_status_at, finalized
-        if finalized:
-            return
-        if text == last_status:
-            return
-        async with status_lock:
-            if finalized:
-                return
-            # Telegram may reject too-frequent edits; serialize with spacing.
-            delta = time.monotonic() - last_status_at
-            if delta < 0.9:
-                await asyncio.sleep(0.9 - delta)
-            try:
-                await thinking.edit_text(text)
-                last_status = text
-                last_status_at = time.monotonic()
-            except Exception:  # noqa: BLE001
-                # Status updates are optional UX; ignore transient edit failures.
-                pass
+    user_lock: asyncio.Lock | None = None
+    user_lock_acquired = False
+    acquired_global_slot = False
+    started_at = 0.0
+    success = False
+    if per_user_guard_enabled:
+        user_lock = runtime.lock_for_user(user.id)
+        if user_lock.locked():
+            runtime.user_busy_rejections += 1
+            await update.message.reply_text(
+                "⏳ I am still processing your previous message. "
+                "Please wait a few seconds and try again."
+            )
+            return TRIAL_WAITING_QUERY
+        await user_lock.acquire()
+        user_lock_acquired = True
 
     try:
-        history = _get_trial_history(context)
-        if orchestrator is not None:
-            loop = asyncio.get_running_loop()
-            stage_map = {
-                "layer1_start": "🧠 Step 1/3: Understanding your request...",
-                "fast_path_start": "⚡ Fast mode: answering directly...",
-                "layer2_start": "🧭 Step 2/3: Building response plan...",
-                "layer3_start": "✍️ Step 3/3: Finalizing answer...",
-            }
-
-            def _on_stage(stage: str) -> None:
-                text = stage_map.get(stage)
-                if not text:
-                    return
-                loop.call_soon_threadsafe(
-                    asyncio.create_task,
-                    _set_status(text),
-                )
-
-            timeout_sec = float(
-                os.environ.get("ASSISTANT_ORCHESTRATOR_TIMEOUT_SEC", "90")
-            )
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    orchestrator.run,
-                    question=prompt,
-                    history=history,
-                    stage_callback=_on_stage,
-                ),
-                timeout=timeout_sec,
-            )
-            answer = result.final_answer
-        else:
-            await _set_status("🔎 Looking for relevant context...")
-            timeout_sec = float(
-                os.environ.get("ASSISTANT_SIMPLE_ANSWER_TIMEOUT_SEC", "90")
-            )
-            answer = await asyncio.wait_for(
-                asyncio.to_thread(
-                    assistant.answer_market_question,
-                    question=prompt,
-                ),
-                timeout=timeout_sec,
-            )
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Trial chat failed: %s", exc)
         try:
-            timeout_sec = float(
-                os.environ.get("ASSISTANT_SIMPLE_ANSWER_TIMEOUT_SEC", "90")
+            await asyncio.wait_for(
+                runtime.semaphore.acquire(),
+                timeout=max(0.01, float(acquire_timeout_sec)),
             )
-            answer = await asyncio.wait_for(
-                asyncio.to_thread(
-                    assistant.answer_market_question,
-                    question=prompt,
-                ),
-                timeout=timeout_sec,
-            )
-        except Exception as fallback_exc:  # noqa: BLE001
-            log.exception("Trial chat fallback failed: %s", fallback_exc)
-            await thinking.edit_text(
-                "⚠️ Sorry, something went wrong while generating the answer."
-                " Please try again."
+        except asyncio.TimeoutError:
+            runtime.overload_rejections += 1
+            await update.message.reply_text(
+                "⚠️ High load right now. Please retry in 10-20 seconds."
             )
             return TRIAL_WAITING_QUERY
 
-    _append_trial_history(context, role="user", content=prompt)
-    _append_trial_history(context, role="assistant", content=answer)
-    rendered_answer = _normalize_telegram_text(answer)
+        acquired_global_slot = True
+        runtime.active += 1
+        started_at = time.monotonic()
+        route = "simple"
 
-    display_used = min(used + 1, limit)
-    final_text = f"{rendered_answer}\n\n—\nUsed {display_used}/{limit}"
-    finalized = True
-    ok = await _safe_edit_text(
-        thinking,
-        final_text,
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=True,
-    )
-    if not ok:
+        plan = "free"
+        limit = PLAN_LIMITS_24H["free"]
+        try:
+            sub = db.get_subscription(user.id)
+            if sub and sub.get("status") == "active":
+                plan = str(sub.get("plan", "free"))
+                limit = PLAN_LIMITS_24H.get(plan, PLAN_LIMITS_24H["free"])
+        except Exception:  # noqa: BLE001
+            pass
+
+        used = db.count_bot_chat_requests_last_24h(user.id)
+        if used >= limit:
+            donate_keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "💳 Upgrade / Donate",
+                        url=DONATE_URL,
+                    )
+                ]
+            ])
+            await update.message.reply_text(
+                (
+                    f"⛔ You reached your current limit: {limit} "
+                    "requests in 24h.\n"
+                    "Please try again later or upgrade your plan."
+                    f"{TRIAL_FOOTER}"
+                ),
+                reply_markup=donate_keyboard,
+            )
+            return TRIAL_WAITING_QUERY
+
+        thinking = await update.message.reply_text(
+            "🤖 Assistant is thinking..."
+        )
+
+        last_status = ""
+        last_status_at = 0.0
+        status_lock = asyncio.Lock()
+        finalized = False
+
+        async def _set_status(text: str) -> None:
+            nonlocal last_status, last_status_at, finalized
+            if finalized:
+                return
+            if text == last_status:
+                return
+            async with status_lock:
+                if finalized:
+                    return
+                # Telegram may reject too-frequent edits; serialize with spacing.
+                delta = time.monotonic() - last_status_at
+                if delta < 0.9:
+                    await asyncio.sleep(0.9 - delta)
+                try:
+                    await thinking.edit_text(text)
+                    last_status = text
+                    last_status_at = time.monotonic()
+                except Exception:  # noqa: BLE001
+                    # Status updates are optional UX; ignore transient edit failures.
+                    pass
+
+        try:
+            history = _get_trial_history(context)
+            answer = ""
+
+            # Prefer replica inference cluster when configured.
+            if infer_client is not None:
+                await _set_status("⚡ Processing with assistant cluster...")
+                try:
+                    answer, route = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            infer_client.generate_answer,
+                            question=prompt,
+                            history=history,
+                            timeout_sec=remote_timeout_sec,
+                        ),
+                        timeout=max(1.0, remote_timeout_sec + 2.0),
+                    )
+                except Exception as remote_exc:  # noqa: BLE001
+                    log.warning("Remote assistant infer failed, fallback local: %s", remote_exc)
+
+            # Local fallback path keeps backward compatibility.
+            if not answer:
+                if orchestrator is not None:
+                    loop = asyncio.get_running_loop()
+                    stage_map = {
+                        "layer1_start": "🧠 Step 1/3: Understanding your request...",
+                        "fast_path_start": "⚡ Fast mode: answering directly...",
+                        "layer2_start": "🧭 Step 2/3: Building response plan...",
+                        "layer3_start": "✍️ Step 3/3: Finalizing answer...",
+                    }
+
+                    def _on_stage(stage: str) -> None:
+                        text = stage_map.get(stage)
+                        if not text:
+                            return
+                        loop.call_soon_threadsafe(
+                            asyncio.create_task,
+                            _set_status(text),
+                        )
+
+                    timeout_sec = float(
+                        os.environ.get("ASSISTANT_ORCHESTRATOR_TIMEOUT_SEC", "90")
+                    )
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            orchestrator.run,
+                            question=prompt,
+                            history=history,
+                            stage_callback=_on_stage,
+                        ),
+                        timeout=timeout_sec,
+                    )
+                    route = str(result.route or "long_path")
+                    answer = result.final_answer
+                else:
+                    await _set_status("🔎 Looking for relevant context...")
+                    timeout_sec = float(
+                        os.environ.get("ASSISTANT_SIMPLE_ANSWER_TIMEOUT_SEC", "90")
+                    )
+                    answer = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            assistant.answer_market_question,
+                            question=prompt,
+                        ),
+                        timeout=timeout_sec,
+                    )
+                    route = "simple"
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Trial chat failed: %s", exc)
+            try:
+                timeout_sec = float(
+                    os.environ.get("ASSISTANT_SIMPLE_ANSWER_TIMEOUT_SEC", "90")
+                )
+                answer = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        assistant.answer_market_question,
+                        question=prompt,
+                    ),
+                    timeout=timeout_sec,
+                )
+                route = "simple"
+            except Exception as fallback_exc:  # noqa: BLE001
+                log.exception("Trial chat fallback failed: %s", fallback_exc)
+                await thinking.edit_text(
+                    "⚠️ Sorry, something went wrong while generating the answer."
+                    " Please try again."
+                )
+                return TRIAL_WAITING_QUERY
+
+        _append_trial_history(context, role="user", content=prompt)
+        _append_trial_history(context, role="assistant", content=answer)
+        rendered_answer = _normalize_telegram_text(answer)
+
+        display_used = min(used + 1, limit)
+        final_text = f"{rendered_answer}\n\n—\nUsed {display_used}/{limit}"
+        finalized = True
         ok = await _safe_edit_text(
             thinking,
-            _strip_telegram_markdown(final_text),
+            final_text,
+            parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
         )
-    if not ok:
-        await update.message.reply_text(
-            _strip_telegram_markdown(final_text),
-            disable_web_page_preview=True,
-        )
+        if not ok:
+            ok = await _safe_edit_text(
+                thinking,
+                _strip_telegram_markdown(final_text),
+                disable_web_page_preview=True,
+            )
+        if not ok:
+            await update.message.reply_text(
+                _strip_telegram_markdown(final_text),
+                disable_web_page_preview=True,
+            )
 
-    # Log usage after user has already received an answer.
-    try:
-        await asyncio.wait_for(
-            asyncio.to_thread(
-                db.insert_bot_chat_request,
-                telegram_user_id=user.id,
-                plan=plan,
-            ),
-            timeout=float(os.environ.get("BOT_USAGE_LOG_TIMEOUT_SEC", "5")),
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Failed to log trial chat usage: %s", exc)
-    return TRIAL_WAITING_QUERY
+        success = True
+        if route == "fast_path":
+            runtime.route_fast_path += 1
+        elif route == "long_path":
+            runtime.route_long_path += 1
+        else:
+            runtime.route_simple += 1
+
+        # Log usage after user has already received an answer.
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    db.insert_bot_chat_request,
+                    telegram_user_id=user.id,
+                    plan=plan,
+                ),
+                timeout=float(os.environ.get("BOT_USAGE_LOG_TIMEOUT_SEC", "5")),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to log trial chat usage: %s", exc)
+        return TRIAL_WAITING_QUERY
+    finally:
+        if acquired_global_slot:
+            runtime.total_latency_sec += max(0.0, time.monotonic() - started_at)
+            runtime.active = max(0, runtime.active - 1)
+            if success:
+                runtime.completed += 1
+            else:
+                runtime.failed += 1
+            runtime.semaphore.release()
+        if user_lock_acquired and user_lock is not None:
+            user_lock.release()
 
 
 async def cb_benefits(
@@ -1843,6 +2081,25 @@ class TelegramBotService:
         )
         self.sheets: GoogleSheetsService = GoogleSheetsService()
         self.assistant_llm = OpenAIMarketAssistantService()
+        self.assistant_remote_timeout_sec = _env_float(
+            "ASSISTANT_REMOTE_TIMEOUT_SEC",
+            70.0,
+        )
+        self.assistant_infer_client = AssistantInferClient.from_raw_urls(
+            os.environ.get("ASSISTANT_INFER_URLS", "")
+        )
+        self.assistant_global_concurrency = _env_int(
+            "ASSISTANT_GLOBAL_CONCURRENCY",
+            24,
+        )
+        self.assistant_per_user_guard_enabled = _env_flag(
+            "ASSISTANT_PER_USER_GUARD_ENABLED",
+            default="1",
+        )
+        self.assistant_acquire_timeout_sec = _env_float(
+            "ASSISTANT_GLOBAL_ACQUIRE_TIMEOUT_SEC",
+            0.2,
+        )
         self.orchestrator_enabled = _env_flag(
             "ASSISTANT_ORCHESTRATOR_ENABLED", default="1"
         )
@@ -1867,6 +2124,17 @@ class TelegramBotService:
         app.bot_data["sheets"] = self.sheets
         app.bot_data["assistant_llm"] = self.assistant_llm
         app.bot_data["assistant_orchestrator"] = self.assistant_orchestrator
+        app.bot_data["assistant_infer_client"] = self.assistant_infer_client
+        app.bot_data["assistant_remote_timeout_sec"] = self.assistant_remote_timeout_sec
+        app.bot_data["assistant_runtime"] = AssistantRuntimeState(
+            max_concurrency=self.assistant_global_concurrency,
+        )
+        app.bot_data["assistant_per_user_guard_enabled"] = (
+            self.assistant_per_user_guard_enabled
+        )
+        app.bot_data["assistant_acquire_timeout_sec"] = (
+            self.assistant_acquire_timeout_sec
+        )
 
         # Trial chat conversation (triggered by inline button)
         trial_conv = ConversationHandler(
@@ -1944,6 +2212,8 @@ class TelegramBotService:
         app.add_handler(CommandHandler("start", cmd_start))
         app.add_handler(CommandHandler("help", cmd_help))
         app.add_handler(CommandHandler("stats", cmd_stats))
+        app.add_handler(CommandHandler("schedule", cmd_schedule))
+        app.add_handler(CommandHandler("assistant_metrics", cmd_assistant_metrics))
         app.add_handler(CommandHandler("restart", cmd_restart))
         app.add_handler(search_conv)
         # Keep support flow before trial flow so feedback text is routed
@@ -2004,6 +2274,8 @@ class TelegramBotService:
                     BotCommand("help", "Show main menu"),
                     BotCommand("search", "Search for jobs"),
                     BotCommand("stats", "Show DB statistics"),
+                    BotCommand("schedule", "Show reports schedule"),
+                    BotCommand("assistant_metrics", "Show assistant runtime metrics"),
                     BotCommand("restart", "Restart & clear session"),
                     BotCommand("cancel", "Cancel current action"),
                 ]

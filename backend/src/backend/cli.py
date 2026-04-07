@@ -15,6 +15,7 @@ from backend.services.postgres import (
     PostgresJobExportService,
 )
 from backend.services.stripe_webhook import StripeWebhookService
+from backend.services.assistant_infer_server import AssistantInferServer
 from backend.services.telegram_bot import TelegramBotService
 
 
@@ -259,6 +260,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     webhook_parser.set_defaults(func=stripe_webhook_command)
 
+    infer_parser = subparsers.add_parser(
+        "assistant-infer",
+        help="Start assistant inference HTTP server for replica scaling.",
+    )
+    infer_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Port to listen on. Default: ASSISTANT_INFER_PORT or 8090",
+    )
+    infer_parser.set_defaults(func=assistant_infer_command)
+
     return parser
 
 
@@ -275,6 +288,13 @@ def stripe_webhook_command(args: argparse.Namespace) -> int:
     db_url: str | None = args.db_url or None
     port: int | None = args.port or None
     server = StripeWebhookService(db_url=db_url, port=port)
+    server.run()
+    return 0
+
+
+def assistant_infer_command(args: argparse.Namespace) -> int:
+    """Start assistant inference HTTP server (blocking)."""
+    server = AssistantInferServer(port=args.port or None)
     server.run()
     return 0
 

@@ -98,11 +98,22 @@ set -euo pipefail
 cd /etc/vacancy-mirror
 docker compose pull backend
 docker compose pull support-webhook || true
+        docker compose pull assistant-infer-1 assistant-infer-2 assistant-infer-3 || true
 if docker compose config --services | grep -qx 'grafana-backend'; then
-  docker compose up -d --no-deps backend support-webhook grafana-backend
+          SERVICES="backend support-webhook grafana-backend"
 else
-  docker compose up -d --no-deps backend support-webhook
+          SERVICES="backend support-webhook"
+        fi
+        if docker compose config --services | grep -qx 'assistant-infer-1'; then
+          SERVICES="$SERVICES assistant-infer-1"
+        fi
+        if docker compose config --services | grep -qx 'assistant-infer-2'; then
+          SERVICES="$SERVICES assistant-infer-2"
+        fi
+        if docker compose config --services | grep -qx 'assistant-infer-3'; then
+          SERVICES="$SERVICES assistant-infer-3"
 fi
+        docker compose up -d --no-deps $SERVICES
 echo "Backend container restarted."
 docker compose logs backend --tail 20 2>&1 || true
 REMOTE

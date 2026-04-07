@@ -59,7 +59,7 @@ class TelegramBotStartSheetsSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["stripe_customer_id"], "cus_1")
         self.assertEqual(payload["stripe_subscription_id"], "sub_1")
         self.assertTrue(payload["last_updated"])
-        self.assertEqual(len(message.calls), 1)
+        self.assertEqual(len(message.calls), 2)
 
     async def test_start_preserves_first_seen_and_refreshes_last_updated(self) -> None:
         user = types.SimpleNamespace(
@@ -107,7 +107,7 @@ class TelegramBotStartSheetsSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["first_seen"], "2026-01-01 10:00:00")
         self.assertTrue(payload["last_updated"])
         self.assertNotEqual(payload["last_updated"], "2026-01-01 10:00:00")
-        self.assertEqual(len(message.calls), 1)
+        self.assertEqual(len(message.calls), 2)
 
     async def test_start_escapes_first_name_for_markdown_v2(self) -> None:
         user = types.SimpleNamespace(
@@ -134,11 +134,23 @@ class TelegramBotStartSheetsSyncTest(unittest.IsolatedAsyncioTestCase):
 
         await cmd_start(update, context)
 
-        self.assertEqual(len(message.calls), 1)
-        args, kwargs = message.calls[0]
-        text = args[0]
-        self.assertIn("Ann\\_\\[Dev\\]\\(QA\\)\\!", text)
-        self.assertEqual(kwargs.get("parse_mode"), ParseMode.MARKDOWN_V2)
+        self.assertEqual(len(message.calls), 2)
+        first_args, first_kwargs = message.calls[0]
+        first_text = first_args[0]
+        self.assertIn("Ann\\_\\[Dev\\]\\(QA\\)\\!", first_text)
+        self.assertIn("*Coming soon: Pro Plus subscription*", first_text)
+        self.assertIn("Extended Projects Agent", first_text)
+        self.assertIn("/schedule — reports schedule", first_text)
+        self.assertEqual(first_kwargs.get("parse_mode"), ParseMode.MARKDOWN_V2)
+
+        second_args, second_kwargs = message.calls[1]
+        second_text = second_args[0]
+        self.assertIn("Monday — Top Trends chart \\(Free\\)", second_text)
+        self.assertIn("Tuesday — Top 10 Roles \\(Plus\\)", second_text)
+        self.assertIn("Wednesday — Top 20 Technologies \\(Plus\\)", second_text)
+        self.assertIn("Thursday — Top 10 Profile Optimisation Tips \\(Free\\)", second_text)
+        self.assertIn("Friday — Top 20 Skills \\(Free\\)", second_text)
+        self.assertEqual(second_kwargs.get("parse_mode"), ParseMode.MARKDOWN_V2)
 
 
 if __name__ == "__main__":
