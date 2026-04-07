@@ -319,9 +319,9 @@ export default function PrivacyPage() {
           <Section title="18. Governing Law & Disputes">
             <p>
               These Terms are governed by and construed in accordance with the
-              laws of the Republic of Serbia. Any disputes arising from or
+              laws of the Republic of Lithuania. Any disputes arising from or
               relating to these Terms or your use of the service shall be
-              resolved in the courts of Belgrade, Serbia, unless mandatory
+              resolved in the courts of Vilnius, Lithuania, unless mandatory
               consumer protection laws in your jurisdiction require otherwise.
             </p>
             <p className="mt-3">
