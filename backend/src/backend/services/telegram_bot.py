@@ -375,23 +375,29 @@ async def cmd_start(
         text = (
             f"👋 *Welcome, {user.first_name}\\!*\n\n"
 
-            "🪞 *Meet Vacancy Mirror*\n"
+            "🪞 *Vacancy Mirror*\n"
             "AI\\-powered freelance market intelligence\\.\n"
             "Stop guessing — start knowing\\. 🎯\n\n"
 
             "✅ *What you get:*\n"
-            "🔍 Semantic job search — by meaning, not just "
-            "keywords\n"
-            "🧩 Role clusters — see who's actually hiring\n"
-            "🤖 AI answers on skills, roles & market trends\n"
-            "📈 Know what the market wants before you apply\n\n"
+            "📊 Weekly market trends report\n"
+            "💬 AI assistant — skills, roles \\& career advice\n"
+            "📈 Trend charts — what's growing \\& declining\n"
+            "🎯 Profile optimisation tips \\(Plus\\)\n"
+            "🤖 Portfolio review agent \\(Plus\\)\n"
+            "🏷️ Skills \\& tags report \\(Pro Plus\\)\n\n"
 
-            "📡 *Data sources:* publicly available freelance market data\n"
-            "including Google Trends signals for trend analytics\\.\n\n"
-            "🧠 We continuously collect and analyse market signals to "
-            "produce aggregated freelance trends and insights\\.\n\n"
+            "📡 *Data sources:*\n"
+            "Publicly available job listings, Upwork market trends,\n"
+            "Google search trends \\& aggregated market signals\\.\n\n"
 
-            "🚀 Ready to explore the market?\n"
+            "⌨️ *Commands:*\n"
+            "/start — main menu\n"
+            "/search — semantic job search\n"
+            "/stats — market stats\n"
+            "/help — show this message\n\n"
+
+            "🚀 *Ready to explore?*\n"
             "Pick an option below 👇"
         )
 
