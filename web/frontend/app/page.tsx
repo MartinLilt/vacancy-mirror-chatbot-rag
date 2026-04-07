@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import Image from "next/image";
 
 export const metadata: Metadata = {
   title: "Vacancy Mirror — AI market intelligence for Upwork freelancers",
@@ -191,7 +192,12 @@ export default function HomePage() {
           </div>
 
           {/* Pro Plus */}
-          <div className="bg-white/5 border border-white/10 rounded-2xl p-7 flex flex-col">
+          <div className="relative bg-white/5 border border-white/10 rounded-2xl p-7 flex flex-col">
+            <div className="absolute top-4 right-4">
+              <span className="bg-amber-500/20 border border-amber-400/40 text-amber-300 text-xs font-semibold px-2.5 py-1 rounded-full">
+                Coming soon
+              </span>
+            </div>
             <div className="mb-6">
               <h3 className="text-lg font-semibold mb-1">Pro Plus</h3>
               <div className="text-4xl font-bold mb-3">
@@ -205,14 +211,9 @@ export default function HomePage() {
               <li className="flex gap-2"><span className="text-indigo-400">✓</span>Up to 12 portfolio projects</li>
               <li className="flex gap-2"><span className="text-indigo-400">✓</span>Weekly Skills &amp; Tags Report</li>
             </ul>
-            <a
-              href={process.env.NEXT_PUBLIC_STRIPE_PRO_PLUS_URL ?? "#"}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="block text-center bg-white/10 hover:bg-white/20 text-white font-semibold py-3 rounded-xl transition-colors text-sm"
-            >
-              Get Pro Plus — $19.99 / mo
-            </a>
+            <div className="block text-center bg-white/5 text-gray-400 font-semibold py-3 rounded-xl border border-white/10 text-sm cursor-not-allowed">
+              Coming soon
+            </div>
           </div>
         </div>
       </section>
@@ -246,7 +247,13 @@ export default function HomePage() {
       <footer className="border-t border-white/5 py-10">
         <div className="max-w-5xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-gray-600">
           <div className="flex items-center gap-2">
-            <span className="text-indigo-500">◈</span>
+            <Image
+              src="/brand-circle.png"
+              alt="Vacancy Mirror"
+              width={28}
+              height={28}
+              className="rounded-full object-cover"
+            />
             <span>© {new Date().getFullYear()} Vacancy Mirror</span>
           </div>
           <nav className="flex items-center gap-6">

@@ -64,6 +64,7 @@ const plans = [
     cta: "Subscribe — $19.99 / mo",
     href: PRO_PLUS_URL,
     highlighted: false,
+    comingSoon: true,
   },
 ];
 
@@ -126,6 +127,14 @@ function PlanCard({
         </div>
       )}
 
+      {plan.comingSoon && (
+        <div className="absolute top-4 right-4">
+          <span className="bg-amber-500/20 border border-amber-400/40 text-amber-300 text-xs font-semibold px-2.5 py-1 rounded-full">
+            Coming soon
+          </span>
+        </div>
+      )}
+
       <div className="mb-6">
         <h2 className="text-lg font-semibold mb-1">{plan.name}</h2>
         <div className="flex items-end gap-1 mb-3">
@@ -144,18 +153,24 @@ function PlanCard({
         ))}
       </ul>
 
-      <a
-        href={plan.href}
-        target={plan.href.startsWith("http") ? "_blank" : undefined}
-        rel="noopener noreferrer"
-        className={`w-full text-center py-3 rounded-xl text-sm font-semibold transition-all ${
-          plan.highlighted
-            ? "bg-indigo-600 hover:bg-indigo-500 text-white"
-            : "bg-white/10 hover:bg-white/20 text-white"
-        }`}
-      >
-        {plan.cta}
-      </a>
+      {plan.comingSoon ? (
+        <div className="w-full text-center py-3 rounded-xl text-sm font-semibold bg-white/5 text-gray-400 border border-white/10 cursor-not-allowed">
+          Coming soon
+        </div>
+      ) : (
+        <a
+          href={plan.href}
+          target={plan.href.startsWith("http") ? "_blank" : undefined}
+          rel="noopener noreferrer"
+          className={`w-full text-center py-3 rounded-xl text-sm font-semibold transition-all ${
+            plan.highlighted
+              ? "bg-indigo-600 hover:bg-indigo-500 text-white"
+              : "bg-white/10 hover:bg-white/20 text-white"
+          }`}
+        >
+          {plan.cta}
+        </a>
+      )}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 
 const navLinks = [
@@ -19,7 +20,13 @@ export default function Navbar() {
           href="/"
           className="flex items-center gap-2 font-semibold text-white hover:opacity-80 transition-opacity"
         >
-          <span className="text-indigo-400 text-lg">◈</span>
+          <Image
+            src="/brand-circle.png"
+            alt="Vacancy Mirror"
+            width={28}
+            height={28}
+            className="rounded-full object-cover"
+          />
           <span>Vacancy Mirror</span>
         </Link>
 

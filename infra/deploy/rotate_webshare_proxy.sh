@@ -9,8 +9,7 @@
 #   2. Обновляет PROXY_URL в /etc/vacancy-mirror/scraper.env
 #      Формат: http://username:password@p.webshare.io:80
 #      (plain residential — без sticky session суффикса)
-#   3. Обновляет конфиг Squid (если используется)
-#   4. Перезапускает scraper контейнер
+#   3. Перезапускает scraper контейнер
 #
 # Cron (запуск каждый день в 02:00):
 #   0 2 * * * /etc/vacancy-mirror/rotate_webshare_proxy.sh >> /var/log/rotate_webshare_proxy.log 2>&1
@@ -35,7 +34,6 @@ ENV_FILE="/etc/vacancy-mirror/scraper.env"
 # Docker-compose читает переменные из .env (не из scraper.env)
 # Поэтому обновляем оба файла
 COMPOSE_ENV_FILE="/etc/vacancy-mirror/.env"
-SQUID_CONF="/etc/squid/squid.conf"
 COMPOSE_FILE="/etc/vacancy-mirror/docker-compose.yml"
 CONTAINER_NAME="scraper"
 
@@ -95,19 +93,7 @@ update_proxy_in_file "$ENV_FILE"
 update_proxy_in_file "$COMPOSE_ENV_FILE"
 
 # ---------------------------------------------------------------------------
-# 4. Обновляем Squid (если используется и запущен)
-# ---------------------------------------------------------------------------
-if [[ -f "$SQUID_CONF" ]] && pgrep -x squid > /dev/null 2>&1; then
-    log "Updating Squid config..."
-    # Обновляем cache_peer строку: login=username:password
-    sed -i "s|cache_peer ${WEBSHARE_HOST} parent.*|cache_peer ${WEBSHARE_HOST} parent ${WEBSHARE_PORT} 0 no-query default login=${WS_USERNAME}:${WS_PASSWORD}|" "$SQUID_CONF"
-    squid -k reconfigure 2>/dev/null && log "Squid reconfigured" || log "WARN: squid reconfigure failed (non-fatal)"
-else
-    log "Squid not running — skipping Squid update"
-fi
-
-# ---------------------------------------------------------------------------
-# 5. Перезапускаем scraper контейнер
+# 4. Перезапускаем scraper контейнер
 # ---------------------------------------------------------------------------
 if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     log "Restarting container: ${CONTAINER_NAME}..."

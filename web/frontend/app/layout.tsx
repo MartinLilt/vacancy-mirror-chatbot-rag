@@ -48,9 +48,9 @@ export const metadata: Metadata = {
       "recommendations for Upwork freelancers — delivered via Telegram.",
     images: [
       {
-        url: "/og-image.png",
-        width: 1200,
-        height: 630,
+        url: "/brand-circle.png",
+        width: 1024,
+        height: 1024,
         alt: "Vacancy Mirror — AI job matching for Upwork freelancers",
       },
     ],
@@ -63,7 +63,7 @@ export const metadata: Metadata = {
     description:
       "Weekly market trends, AI profile advice and portfolio " +
       "recommendations for Upwork freelancers — delivered via Telegram.",
-    images: ["/og-image.png"],
+    images: ["/brand-circle.png"],
   },
 
   robots: {
@@ -82,8 +82,11 @@ export const metadata: Metadata = {
   },
 
   icons: {
-    icon: "/favicon.ico",
-    shortcut: "/favicon.ico",
+    icon: [
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    shortcut: "/icon-192.png",
     apple: "/apple-touch-icon.png",
   },
 };

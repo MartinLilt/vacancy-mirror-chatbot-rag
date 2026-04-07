@@ -2,10 +2,13 @@
 # Deployed to /etc/vacancy-mirror/docker-compose.yml by provision.sh
 #
 # Services:
-#   postgres  — persistent DB (pgvector)
-#   backend   — Telegram bot (pulls from ghcr.io)
-#   api       — FastAPI (web/api, pulls from ghcr.io)
-#   nginx     — reverse proxy: 80/443 → api:8000
+#   postgres          — persistent DB (pgvector)
+#   backend           — Telegram bot (pulls from ghcr.io)
+#   support-webhook   — Stripe webhook handler (port 8080, localhost only)
+#   api               — FastAPI (web/api, pulls from ghcr.io)
+#   grafana-backend   — monitoring dashboard (port 3001, localhost only)
+#
+# Reverse proxy: host-level nginx (systemd) on port 80/443
 
 services:
   postgres:
@@ -45,8 +48,8 @@ services:
     restart: unless-stopped
     env_file:
       - /etc/vacancy-mirror/backend.env
-    expose:
-      - "8080"
+    ports:
+      - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,17 +66,6 @@ services:
       postgres:
         condition: service_healthy
 
-  nginx:
-    image: nginx:alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - /etc/vacancy-mirror/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro
-    depends_on:
-      - api
 
   grafana-backend:
     image: grafana/grafana:latest
@@ -88,7 +80,7 @@ services:
       - grafana-backend-data:/var/lib/grafana
       - /etc/vacancy-mirror/grafana-backend/provisioning:/etc/grafana/provisioning:ro
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     depends_on:
       postgres:
         condition: service_healthy
