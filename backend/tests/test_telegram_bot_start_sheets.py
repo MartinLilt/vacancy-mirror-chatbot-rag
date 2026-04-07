@@ -4,6 +4,8 @@ import types
 import unittest
 from unittest.mock import Mock
 
+from telegram.constants import ParseMode
+
 from backend.services.telegram_bot import cmd_start
 
 
@@ -106,6 +108,37 @@ class TelegramBotStartSheetsSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["last_updated"])
         self.assertNotEqual(payload["last_updated"], "2026-01-01 10:00:00")
         self.assertEqual(len(message.calls), 1)
+
+    async def test_start_escapes_first_name_for_markdown_v2(self) -> None:
+        user = types.SimpleNamespace(
+            id=777,
+            first_name="Ann_[Dev](QA)!",
+            last_name="",
+            username="ann",
+        )
+        message = _DummyMessage()
+        update = types.SimpleNamespace(effective_user=user, message=message)
+
+        db = Mock()
+        db.get_subscription.return_value = None
+        db.get_user_for_sheet.return_value = None
+
+        sheets = Mock()
+        context = types.SimpleNamespace(
+            bot_data={
+                "allowed_ids": {777},
+                "db": db,
+                "sheets": sheets,
+            }
+        )
+
+        await cmd_start(update, context)
+
+        self.assertEqual(len(message.calls), 1)
+        args, kwargs = message.calls[0]
+        text = args[0]
+        self.assertIn("Ann\\_\\[Dev\\]\\(QA\\)\\!", text)
+        self.assertEqual(kwargs.get("parse_mode"), ParseMode.MARKDOWN_V2)
 
 
 if __name__ == "__main__":

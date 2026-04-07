@@ -276,6 +276,8 @@ async def cmd_start(
         )
         return
 
+    safe_first_name = _escape_markdown_v2(user.first_name or "there")
+
     # Check existing subscription in DB so returning users
     # who deleted the chat history still see their plan.
     db_service: PostgresJobExportService = (
@@ -366,14 +368,14 @@ async def cmd_start(
             else "🚀 Pro Plus"
         )
         text = (
-            f"👋 *Welcome back, {user.first_name}\\!*\n\n"
+            f"👋 *Welcome back, {safe_first_name}\\!*\n\n"
             f"✅ Your *{plan_label}* subscription is active\\.\n"
             "All your features are ready to use\\.\n\n"
             "Pick an option below 👇"
         )
     else:
         text = (
-            f"👋 *Welcome, {user.first_name}\\!*\n\n"
+            f"👋 *Welcome, {safe_first_name}\\!*\n\n"
 
             "🪞 *Vacancy Mirror*\n"
             "AI\\-powered freelance market intelligence\\.\n"
@@ -1734,29 +1736,33 @@ async def handle_search_query(
         )
         return ConversationHandler.END
 
+    safe_query = _escape_markdown_v2(query_text)
     if not jobs:
         await update.message.reply_text(
-            f"😕 No jobs found for *{query_text}*\\.\n"
+            f"😕 No jobs found for *{safe_query}*\\.\n"
             "Try different keywords\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
         return ConversationHandler.END
 
     await update.message.reply_text(
-        f"✅ Found *{len(jobs)}* matching jobs for *{query_text}*:",
+        f"✅ Found *{len(jobs)}* matching jobs for *{safe_query}*:",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
     for job in jobs:
-        title = job.get("title", "No title")
-        category = job.get("category_name", "—")
-        uid = job.get("uid", "")
+        title = str(job.get("title", "No title"))
+        category = str(job.get("category_name", "—"))
+        uid = str(job.get("uid", ""))
         url = (
             f"https://www.upwork.com/jobs/~{uid}" if uid else "—"
         )
+        safe_title = _escape_markdown_v2(title)
+        safe_category = _escape_markdown_v2(category)
+        safe_url = _escape_markdown_v2(url)
         text = (
-            f"📌 *{title}*\n"
-            f"Category: {category}\n"
-            f"[View on Upwork]({url})"
+            f"📌 *{safe_title}*\n"
+            f"Category: {safe_category}\n"
+            f"Link: {safe_url}"
         )
         await update.message.reply_text(
             text,
