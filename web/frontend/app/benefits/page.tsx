@@ -19,6 +19,7 @@ export const metadata: Metadata = {
 
 const features = [
   {
+    id: "trends-report",
     badge: "Free",
     badgeColor: "bg-gray-700 text-gray-300",
     icon: "📊",
@@ -35,6 +36,7 @@ const features = [
     note: "Based on publicly available market data only.",
   },
   {
+    id: "ai-assistant",
     badge: "Free",
     badgeColor: "bg-gray-700 text-gray-300",
     icon: "💬",
@@ -54,6 +56,7 @@ const features = [
       "Limit: 35 messages / 24 h (Free) · 60 (Plus) · 120 (Pro Plus).",
   },
   {
+    id: "trend-charts",
     badge: "Free",
     badgeColor: "bg-gray-700 text-gray-300",
     icon: "📈",
@@ -69,6 +72,7 @@ const features = [
     note: "Charts are created from publicly available job market data.",
   },
   {
+    id: "profile-optimisation",
     badge: "Plus",
     badgeColor: "bg-indigo-600 text-indigo-100",
     icon: "🎯",
@@ -87,6 +91,7 @@ const features = [
       "All recommendations are for you to review and apply manually.",
   },
   {
+    id: "projects-agent",
     badge: "Plus",
     badgeColor: "bg-indigo-600 text-indigo-100",
     icon: "🤖",
@@ -102,6 +107,7 @@ const features = [
     note: "Does not connect to or modify your Upwork account.",
   },
   {
+    id: "extended-projects-agent",
     badge: "Pro Plus",
     badgeColor: "bg-violet-600 text-violet-100",
     icon: "🚀",
@@ -116,6 +122,7 @@ const features = [
     note: null,
   },
   {
+    id: "skills-tags-report",
     badge: "Pro Plus",
     badgeColor: "bg-violet-600 text-violet-100",
     icon: "🏷️",
@@ -160,7 +167,8 @@ export default function BenefitsPage() {
           {features.map((f) => (
             <div
               key={f.title}
-              className="bg-white/5 border border-white/10 rounded-2xl p-8"
+              id={f.id}
+              className="bg-white/5 border border-white/10 rounded-2xl p-8 scroll-mt-24"
             >
               <div className="flex items-start gap-4 mb-4">
                 <span className="text-3xl">{f.icon}</span>

@@ -26,9 +26,9 @@ const plans = [
     period: "forever",
     description: "Get started with daily AI insights, no card required.",
     features: [
-      "35 AI messages / day",
-      "Weekly Trends Report",
-      "Weekly Trend Charts",
+      { label: "35 AI messages / day", href: "/benefits#ai-assistant" },
+      { label: "Weekly Trends Report", href: "/benefits#trends-report" },
+      { label: "Weekly Trend Charts", href: "/benefits#trend-charts" },
     ],
     cta: "Start in Telegram",
     href: "https://t.me/VacancyMirrorBot",
@@ -40,10 +40,10 @@ const plans = [
     period: "/ month",
     description: "Optimise your profile and grow your project portfolio.",
     features: [
-      "60 AI messages / day",
-      "Profile Optimisation Expert",
-      "Weekly Profile & Projects Agent",
-      "Up to 5 portfolio projects reviewed",
+      { label: "60 AI messages / day", href: "/benefits#ai-assistant" },
+      { label: "Profile Optimisation Expert", href: "/benefits#profile-optimisation" },
+      { label: "Weekly Profile & Projects Agent", href: "/benefits#projects-agent" },
+      { label: "Up to 5 portfolio projects reviewed", href: "/benefits#projects-agent" },
     ],
     cta: "Subscribe — $9.99 / mo",
     href: PLUS_URL,
@@ -55,11 +55,11 @@ const plans = [
     period: "/ month",
     description: "Full market coverage for serious freelancers.",
     features: [
-      "120 AI messages / day",
-      "Extended Projects Agent",
-      "Up to 12 portfolio projects reviewed",
-      "Weekly Skills & Tags Report",
-      "Full portfolio aligned with market trends",
+      { label: "120 AI messages / day", href: "/benefits#ai-assistant" },
+      { label: "Extended Projects Agent", href: "/benefits#extended-projects-agent" },
+      { label: "Up to 12 portfolio projects reviewed", href: "/benefits#extended-projects-agent" },
+      { label: "Weekly Skills & Tags Report", href: "/benefits#skills-tags-report" },
+      { label: "Full portfolio aligned with market trends", href: "/benefits#extended-projects-agent" },
     ],
     cta: "Subscribe — $19.99 / mo",
     href: PRO_PLUS_URL,
@@ -146,9 +146,14 @@ function PlanCard({
 
       <ul className="space-y-3 mb-8 flex-1">
         {plan.features.map((feature) => (
-          <li key={feature} className="flex items-start gap-2 text-sm">
+          <li key={feature.label} className="flex items-start gap-2 text-sm">
             <span className="text-indigo-400 mt-0.5">✓</span>
-            <span className="text-gray-300">{feature}</span>
+            <a
+              href={feature.href}
+              className="text-gray-300 hover:text-indigo-400 hover:underline transition-colors"
+            >
+              {feature.label}
+            </a>
           </li>
         ))}
       </ul>
