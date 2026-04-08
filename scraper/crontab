@@ -8,6 +8,6 @@
 0 8-22 * * 1-6 /app/scripts/chaos_runner.sh >> /var/log/scraper.log 2>&1
 
 # Webshare real proxy usage snapshot every 15 minutes
-*/15 * * * * /usr/local/bin/python -m scraper.cli collect-proxy-usage >> /var/log/scraper.log 2>&1
+*/15 * * * * /bin/bash /app/scripts/collect_proxy_usage_runner.sh >> /var/log/scraper.log 2>&1
 
 # Empty line required at end of crontab file
