@@ -28,6 +28,7 @@ import os
 import sys
 
 from scraper.categories import CATEGORY_UIDS, CATEGORY_TOTAL_JOBS
+from scraper.paging_bounds import bounded_real_max_from_paging
 from scraper.services.postgres import ScraperPostgresService
 from scraper.services.webshare import WebshareClient
 from scraper.services.upwork_scraper import (
@@ -818,20 +819,32 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                     source,
                 )
         elif paging_total > 0:
-            # Single-page paging.total can be context-sensitive.
-            # Protect against obvious undercounts by flooring to known baseline.
             known_total = CATEGORY_TOTAL_JOBS.get(cat_uid, 0)
-            safe_total = max(paging_total, known_total)
-            real_max = min(100, math.ceil(safe_total / PER_PAGE))
-            if real_max > existing_real_max:
+            real_max, decision = bounded_real_max_from_paging(
+                paging_total=paging_total,
+                existing_real_max=existing_real_max,
+                per_page=PER_PAGE,
+                max_allowed_page=100,
+            )
+            # Keep dashboard totals realistic even when page-1 paging.total is low:
+            # use baseline as floor for total_upwork_jobs, while real_max_page
+            # stays bounded by live paging to avoid empty page churn.
+            display_total = max(
+                paging_total,
+                known_total,
+                int(cat_state.get("total_upwork_jobs", 0) or 0),
+            )
+            cat_state["total_upwork_jobs"] = display_total
+            if decision != "kept":
                 cat_state["real_max_page"] = real_max
-                cat_state["total_upwork_jobs"] = safe_total
                 log.info(
-                    "   📏 [%s] real_max_page=%d (paging_total=%d, baseline=%d, raised, %s)",
+                    "   📏 [%s] real_max_page=%d (paging_total=%d, baseline=%d, total_upwork_jobs=%d, %s, %s)",
                     cat_name,
                     real_max,
                     paging_total,
                     known_total,
+                    display_total,
+                    decision,
                     source,
                 )
 
