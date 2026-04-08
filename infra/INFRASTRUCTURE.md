@@ -27,11 +27,11 @@ ssh -i ~/.ssh/vacancy_mirror_deploy -p 2222 root@178.104.110.28   # scraper
 
 | Service | Type | Port | Access | Purpose |
 |---------|------|------|--------|---------|
-| **nginx** | Host (systemd) | `0.0.0.0:80/443` | Public | Reverse proxy → support-webhook, api. TLS via Let's Encrypt (`api.vacancy-mirror.com`) |
+| **nginx** | Host (systemd) | `0.0.0.0:80/443` | Public | Reverse proxy → `127.0.0.1:8080` (support-webhook), `127.0.0.1:8000` (api). TLS via Let's Encrypt (`api.vacancy-mirror.com`) |
 | **backend** (Telegram bot) | Docker | — | Internal only | Telegram long-polling worker |
 | **assistant-infer-1/2/3** | Docker | `8090` (internal) | Internal only | Horizontal assistant inference replicas. Backend load-balances via `ASSISTANT_INFER_URLS` |
 | **support-webhook** | Docker | `127.0.0.1:8080` | Localhost only | Stripe webhook + support endpoints |
-| **api** | Docker | expose `8000` (internal) | Via nginx | FastAPI web API (for frontend) |
+| **api** | Docker | `127.0.0.1:8000` | Via nginx | FastAPI web API (for frontend) |
 | **postgres** (pgvector) | Docker | `127.0.0.1:5432` | Localhost only | Product DB |
 | **grafana-backend** | Docker | `127.0.0.1:3001` | Localhost only | Backend monitoring (datasource: PostgreSQL) |
 | **chatwoot-rails** | Docker | `127.0.0.1:3002` | Localhost only | Support UI |
@@ -47,9 +47,11 @@ Config source: `infra/deploy/nginx.conf` → deployed to `/etc/vacancy-mirror/ng
 
 Routes on `api.vacancy-mirror.com`:
 - Port 80 → 301 redirect to HTTPS (+ ACME challenge passthrough)
-- `https://…/webhook` → `http://support-webhook:8080` (Stripe webhook)
-- `https://…/support/` → `http://support-webhook:8080` (support API)
-- `https://…/` → `http://api:8000` (FastAPI web API)
+- `https://…/webhook` → `http://127.0.0.1:8080` (Stripe webhook via support-webhook container)
+- `https://…/support/` → `http://127.0.0.1:8080` (support API via support-webhook container)
+- `https://…/` → `http://127.0.0.1:8000` (FastAPI via api container)
+
+⚠️ nginx runs on the **host** (systemd), not inside Docker. All upstreams are reached via `127.0.0.1:PORT` (Docker published ports). Do NOT use Docker hostnames or `resolver 127.0.0.11` — Docker embedded DNS is only available inside container network namespaces.
 
 Rate limiting applied via `harden_servers.sh`: `limit_req_zone` 10r/s burst 20, connection limits, security headers (X-Frame-Options, X-Content-Type-Options, server_tokens off).
 
@@ -139,8 +141,8 @@ Applied via `infra/deploy/lockdown_network.sh`. Defense-in-depth against Docker-
 - **`live-restore: true`** — Containers survive daemon restarts.
 - **Log limits** — 10MB × 3 files per container (prevents disk exhaustion).
 
-#### DOCKER-USER iptables chain (blocks external → container)
-Docker inserts its own rules in iptables FORWARD chain, bypassing UFW's INPUT chain. The DOCKER-USER chain is the only place where custom rules are respected by Docker:
+#### DOCKER-USER iptables chain (blocks external → container, IPv4 + IPv6)
+Docker inserts its own rules in iptables FORWARD chain, bypassing UFW's INPUT chain. The DOCKER-USER chain is the only place where custom rules are respected by Docker. Rules are applied to both `iptables` (IPv4) and `ip6tables` (IPv6) to prevent bypass:
 - Allow established/related connections (return traffic)
 - Allow loopback (host → container via `127.0.0.1` published ports)
 - Allow Docker inter-container traffic (172.16.0.0/12 ↔ 172.16.0.0/12)
@@ -169,7 +171,7 @@ Containers that don't need internet are on `internal: true` networks (physically
 
 ```
 Layer 1: UFW                  — deny incoming (except SSH 2222 + nginx 80/443)
-Layer 2: DOCKER-USER iptables — block external→container forwarding (Docker bypass fix)
+Layer 2: DOCKER-USER iptables — block external→container forwarding (IPv4 + IPv6)
 Layer 3: userland-proxy=false — no iptables-bypassing docker-proxy processes
 Layer 4: internal networks    — postgres/grafana/prometheus physically can't reach internet
 Layer 5: outbound port limit  — containers limited to ports 443/80/587/53 only
@@ -185,7 +187,7 @@ Layer 6: container hardening  — read_only, no-new-privileges, cap_drop ALL
 | 443 (HTTPS) | Public (nginx → api/webhooks) | Closed |
 | 3000-3002 | Localhost only | Localhost only |
 | 5432 | Localhost only | Localhost only |
-| 8000 | Internal (via nginx) | Localhost only |
+| 8000 | Localhost only (nginx → api) | Localhost only |
 | 8080 | Localhost only | — |
 | 8090 | Internal (assistant-infer) | — |
 | 8191 | — | Localhost only |

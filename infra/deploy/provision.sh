@@ -58,6 +58,7 @@ LOCATION="nbg1"               # Nuremberg (low latency to EU)
 OS_IMAGE="ubuntu-24.04"
 SSH_KEY_NAME="vacancy-mirror-deploy"
 SSH_KEY_PATH="$HOME/.ssh/vacancy_mirror_deploy"
+SSH_PORT="${SSH_PORT:-22}"   # default 22 for fresh servers; after hardening use 2222
 
 # Image names in ghcr.io
 GHCR_BACKEND="ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest"
@@ -131,9 +132,10 @@ server_ip() {
 
 wait_for_ssh() {
     local ip="$1"
-    log "Waiting for SSH on $ip ..."
+    log "Waiting for SSH on $ip (port $SSH_PORT) ..."
     until ssh -o StrictHostKeyChecking=no \
                -o ConnectTimeout=5 \
+               -p "$SSH_PORT" \
                -i "$SSH_KEY_PATH" \
                "root@$ip" true 2>/dev/null; do
         sleep 5
@@ -144,6 +146,7 @@ wait_for_ssh() {
 run_remote() {
     local ip="$1"; shift
     ssh -o StrictHostKeyChecking=no \
+        -p "$SSH_PORT" \
         -i "$SSH_KEY_PATH" \
         "root@$ip" "$@"
 }
@@ -151,6 +154,7 @@ run_remote() {
 copy_file() {
     local ip="$1" src="$2" dst="$3"
     scp -o StrictHostKeyChecking=no \
+        -P "$SSH_PORT" \
         -i "$SSH_KEY_PATH" \
         "$src" "root@$ip:$dst"
 }
@@ -158,6 +162,7 @@ copy_file() {
 copy_dir() {
     local ip="$1" src="$2" dst="$3"
     scp -r -o StrictHostKeyChecking=no \
+        -P "$SSH_PORT" \
         -i "$SSH_KEY_PATH" \
         "$src/." "root@$ip:$dst"
 }

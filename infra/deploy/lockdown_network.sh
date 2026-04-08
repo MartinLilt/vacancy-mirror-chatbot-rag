@@ -170,8 +170,17 @@ fi
 # Check if DOCKER-USER has custom rules
 DOCKER_USER_RULES=$(iptables -L DOCKER-USER --line-numbers -n 2>/dev/null | wc -l)
 if [ "$DOCKER_USER_RULES" -le 3 ]; then
-    echo "🔴 RISK: No custom DOCKER-USER rules — Docker ports may be reachable externally"
+    echo "🔴 RISK: No custom DOCKER-USER rules (IPv4) — Docker ports may be reachable externally"
     RISKS=$((RISKS+1))
+fi
+
+# Check IPv6 DOCKER-USER
+DOCKER_USER6_RULES=$(ip6tables -L DOCKER-USER --line-numbers -n 2>/dev/null | wc -l)
+if [ "$DOCKER_USER6_RULES" -le 3 ]; then
+    echo "🔴 RISK: No custom DOCKER-USER rules (IPv6) — containers may bypass restrictions via IPv6"
+    RISKS=$((RISKS+1))
+else
+    echo "✅ IPv6 DOCKER-USER rules present"
 fi
 
 # Check daemon.json for userland-proxy
@@ -264,10 +273,10 @@ echo "✅ Docker daemon hardened"
 DAEMON_SCRIPT
 }
 
-# --- 2b. DOCKER-USER iptables rules ---
+# --- 2b. DOCKER-USER iptables rules (IPv4 + IPv6) ---
 fix_iptables() {
     local ip="$1" name="$2"
-    log "[$name] Applying DOCKER-USER iptables rules..."
+    log "[$name] Applying DOCKER-USER iptables rules (IPv4 + IPv6)..."
 
     ssh_to "$ip" bash <<'IPTABLES_SCRIPT'
 set -euo pipefail
@@ -276,59 +285,83 @@ export DEBIAN_FRONTEND=noninteractive
 # Ensure iptables-persistent is installed
 apt-get install -y -qq iptables-persistent netfilter-persistent > /dev/null 2>&1
 
-echo "--- Configuring DOCKER-USER chain ---"
+# ==========================================================================
+# IPv4 DOCKER-USER rules
+# ==========================================================================
+echo "--- Configuring DOCKER-USER chain (IPv4) ---"
 echo "  (blocks external→container, restricts container outbound)"
 
 # Flush existing DOCKER-USER rules
 iptables -F DOCKER-USER 2>/dev/null || true
 
-# ==========================================================================
 # Rule 1: Allow established/related connections (return traffic)
-# ==========================================================================
 iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
 
-# ==========================================================================
 # Rule 2: Allow loopback traffic (host ↔ container via 127.0.0.1 ports)
 # This is how nginx on the host reaches published container ports.
-# ==========================================================================
 iptables -A DOCKER-USER -i lo -j RETURN
 
-# ==========================================================================
 # Rule 3: Allow Docker inter-container traffic (bridge ↔ bridge)
 # Docker bridge subnets are in 172.16.0.0/12 range.
-# ==========================================================================
 iptables -A DOCKER-USER -s 172.16.0.0/12 -d 172.16.0.0/12 -j RETURN
 
-# ==========================================================================
 # Rule 4: Allow container → internet ONLY on essential ports
 #   443 = HTTPS (Telegram, OpenAI, Stripe, Upwork, GHCR, etc.)
 #    80 = HTTP  (Webshare proxy, ACME, HTTP redirects)
 #   587 = SMTP  (SendGrid/email submission)
 #    53 = DNS   (resolve hostnames)
 # All other outbound ports are BLOCKED (malware C2, crypto mining, etc.)
-# ==========================================================================
 iptables -A DOCKER-USER -s 172.16.0.0/12 ! -d 172.16.0.0/12 -p tcp --dport 443 -j RETURN
 iptables -A DOCKER-USER -s 172.16.0.0/12 ! -d 172.16.0.0/12 -p tcp --dport 80 -j RETURN
 iptables -A DOCKER-USER -s 172.16.0.0/12 ! -d 172.16.0.0/12 -p tcp --dport 587 -j RETURN
 iptables -A DOCKER-USER -s 172.16.0.0/12 ! -d 172.16.0.0/12 -p udp --dport 53 -j RETURN
 iptables -A DOCKER-USER -s 172.16.0.0/12 ! -d 172.16.0.0/12 -p tcp --dport 53 -j RETURN
 
-# ==========================================================================
 # Rule 5: LOG + DROP everything else
 #   - External → container (inbound attack) → DROPPED
 #   - Container → weird port (malware C2)   → DROPPED
-# ==========================================================================
 iptables -A DOCKER-USER -j LOG --log-prefix "DOCKER-USER-DROP: " --log-level 4 -m limit --limit 5/min
 iptables -A DOCKER-USER -j DROP
 
 echo ""
-echo "--- DOCKER-USER rules applied ---"
+echo "--- IPv4 DOCKER-USER rules applied ---"
 iptables -L DOCKER-USER -n -v --line-numbers
+
+# ==========================================================================
+# IPv6 DOCKER-USER rules (mirror of IPv4)
+# Without these, containers could bypass restrictions via IPv6.
+# ==========================================================================
+echo ""
+echo "--- Configuring DOCKER-USER chain (IPv6) ---"
+
+# Docker may not create DOCKER-USER for ip6tables; create if missing
+ip6tables -N DOCKER-USER 2>/dev/null || true
+ip6tables -F DOCKER-USER 2>/dev/null || true
+
+# Rule 1: Allow established/related
+ip6tables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+# Rule 2: Allow loopback
+ip6tables -A DOCKER-USER -i lo -j RETURN
+# Rule 3: Allow Docker inter-container (fd00::/8 covers Docker's IPv6 ULA range)
+ip6tables -A DOCKER-USER -s fd00::/8 -d fd00::/8 -j RETURN
+# Rule 4: Allow container → internet on essential ports only
+ip6tables -A DOCKER-USER -s fd00::/8 ! -d fd00::/8 -p tcp --dport 443 -j RETURN
+ip6tables -A DOCKER-USER -s fd00::/8 ! -d fd00::/8 -p tcp --dport 80 -j RETURN
+ip6tables -A DOCKER-USER -s fd00::/8 ! -d fd00::/8 -p tcp --dport 587 -j RETURN
+ip6tables -A DOCKER-USER -s fd00::/8 ! -d fd00::/8 -p udp --dport 53 -j RETURN
+ip6tables -A DOCKER-USER -s fd00::/8 ! -d fd00::/8 -p tcp --dport 53 -j RETURN
+# Rule 5: LOG + DROP
+ip6tables -A DOCKER-USER -j LOG --log-prefix "DOCKER-USER6-DROP: " --log-level 4 -m limit --limit 5/min
+ip6tables -A DOCKER-USER -j DROP
+
+echo ""
+echo "--- IPv6 DOCKER-USER rules applied ---"
+ip6tables -L DOCKER-USER -n -v --line-numbers 2>/dev/null || echo "(no ip6tables DOCKER-USER)"
 echo ""
 
-# Persist iptables rules across reboots
+# Persist iptables rules across reboots (both v4 and v6)
 netfilter-persistent save > /dev/null 2>&1
-echo "✅ iptables rules persisted (netfilter-persistent)"
+echo "✅ iptables rules persisted (IPv4 + IPv6)"
 IPTABLES_SCRIPT
 }
 

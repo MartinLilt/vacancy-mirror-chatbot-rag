@@ -36,8 +36,6 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - /etc/vacancy-mirror/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    expose:
-      - "5432"
     ports:
       # Bind PostgreSQL to localhost only (not publicly reachable).
       - "127.0.0.1:5432:5432"
@@ -172,8 +170,10 @@ services:
       - /run
     env_file:
       - /etc/vacancy-mirror/backend.env
-    expose:
-      - "8000"
+    ports:
+      # Published to host so nginx (systemd) can reach it via 127.0.0.1:8000.
+      # nginx runs on the host, not in Docker — it cannot use Docker DNS.
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -187,6 +187,12 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/log/grafana
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_BACKEND_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
