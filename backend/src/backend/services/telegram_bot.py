@@ -32,6 +32,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from telegram import (
     BotCommand,
@@ -98,6 +99,18 @@ CB_CANCEL_SUB_ABORT = "cb_cancel_sub_no"
 CB_SUP_REPLY_TG = "sup_reply_tg"
 CB_SUP_REPLY_EMAIL = "sup_reply_email"
 CB_SUP_NO_REPLY = "sup_no_reply"
+
+_DEFAULT_START_PREVIEW_VIDEO_PATH = (
+    Path(__file__).resolve().parents[1] / "assets" / "start_preview.mp4"
+)
+START_PREVIEW_VIDEO_PATH = os.environ.get(
+    "START_PREVIEW_VIDEO_PATH",
+    str(_DEFAULT_START_PREVIEW_VIDEO_PATH),
+).strip()
+START_PREVIEW_VIDEO_ENABLED = os.environ.get(
+    "START_PREVIEW_VIDEO_ENABLED",
+    "1",
+).strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _get_allowed_ids() -> set[int]:
@@ -338,13 +351,52 @@ def _start_keyboard() -> InlineKeyboardMarkup:
 def _schedule_text() -> str:
     """Human-readable weekly reports schedule shown in /schedule and /start."""
     return (
-        "📅 *Reports schedule*\n\n"
-        "Monday — Top Trends chart \\(Free\\)\n"
-        "Tuesday — Top 10 Roles \\(Plus\\)\n"
-        "Wednesday — Top 20 Technologies \\(Plus\\)\n"
-        "Thursday — Top 10 Profile Optimisation Tips \\(Free\\)\n"
-        "Friday — Top 20 Skills \\(Free\\)"
+        "📅 *Weekly reports schedule*\n\n"
+        "🟢 *Monday* — *Top Trends chart* \\(Free\\)\n"
+        "A quick view of what is growing and what is cooling across the market\\.\n\n"
+        "🔵 *Tuesday* — *Top 10 Roles* \\(Plus\\)\n"
+        "The strongest role demand this week, ranked with momentum context\\.\n\n"
+        "🟣 *Wednesday* — *Top 20 Technologies* \\(Plus\\)\n"
+        "The most requested tech stack signals from fresh job activity\\.\n\n"
+        "🟠 *Thursday* — *Top 10 Profile Optimisation Tips* \\(Free\\)\n"
+        "Practical profile upgrades to improve visibility and conversion\\.\n\n"
+        "🟡 *Friday* — *Top 20 Skills* \\(Free\\)\n"
+        "The key skills employers asked for most this week\\."
     )
+
+
+async def _send_start_preview_video(
+    update: Update,
+    *,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup,
+) -> bool:
+    """Send optional preview animation as part of /start welcome message."""
+    if not START_PREVIEW_VIDEO_ENABLED:
+        return False
+    message = update.message
+    if message is None:
+        return False
+    video_path = START_PREVIEW_VIDEO_PATH
+    if not video_path:
+        return False
+    path = Path(video_path)
+    if not path.exists() or not path.is_file():
+        log.warning("/start preview video not found at %s", path)
+        return False
+    try:
+        with path.open("rb") as video_fp:
+            await message.reply_animation(
+                animation=video_fp,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=reply_markup,
+                supports_streaming=True,
+            )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to send /start preview video: %s", exc)
+        return False
 
 
 async def cmd_schedule(
@@ -507,53 +559,55 @@ async def cmd_start(
             "All your features are ready to use\\.\n\n"
             "Pick an option below 👇"
         )
+        send_schedule_followup = True
     else:
-        text = (
+        # Keep this under Telegram media-caption limits so welcome + buttons
+        # fit in a single post.
+        preview_caption = (
             f"👋 *Welcome, {safe_first_name}\\!*\n\n"
-
             "🪞 *Vacancy Mirror*\n"
             "AI\\-powered freelance market intelligence\\.\n"
             "Stop guessing — start knowing\\. 🎯\n\n"
-
             "✅ *What you get:*\n"
-            "📊 Weekly market trends report\n"
-            "💬 AI assistant — skills, roles \\& career advice\n"
-            "📈 Trend charts — what's growing \\& declining\n"
-            "🎯 Profile optimisation tips \\(Plus\\)\n"
-            "🤖 Portfolio review agent \\(Plus\\)\n"
-            "🏷️ Skills \\& tags report \\(Pro Plus\\)\n\n"
-
-            "📡 *Data sources:*\n"
-            "Publicly available job listings, Upwork market trends,\n"
-            "Google search trends \\& aggregated market signals\\.\n\n"
-
-            "🧪 *Coming soon: Pro Plus subscription*\n"
-            "Pro Plus is launching soon and will unlock maximum market coverage:\n"
-            "🚀 Extended Projects Agent \\(up to 12 projects\\)\n"
-            "🏷️ Weekly Skills \\& Tags intelligence report\n"
-            "⚡ Priority access to advanced market intelligence modules\n\n"
-
-            "⌨️ *Commands:*\n"
-            "/start — main menu\n"
-            "/search — semantic job search\n"
-            "/stats — market stats\n"
-            "/schedule — reports schedule\n"
-            "/help — show this message\n\n"
-
-            "🚀 *Ready to explore?*\n"
-            "Pick an option below 👇"
+            "📊 Weekly trends\n"
+            "💬 AI assistant \\(skills, roles, career\\)\n"
+            "📈 Growth/decline signals\n"
+            "🎯 Profile tips \\(Plus\\)\n"
+            "🤖 Portfolio review \\(Plus\\)\n"
+            "🏷️ Skills/tags report \\(Pro Plus\\)\n\n"
+            "🧪 *Pro Plus coming soon*\n"
+            "🚀 Projects Agent \\(up to 12 projects\\)\n"
+            "🏷️ Weekly Skills \\& Tags intelligence\n"
+            "⚡ Priority advanced modules\n\n"
+            "⌨️ *Commands:* /start /search /stats /schedule /help\n\n"
+            "🚀 *Ready to explore?* Pick an option below 👇"
         )
 
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=_start_keyboard(),
-    )
-    await update.message.reply_text(
-        _schedule_text(),
-        parse_mode=ParseMode.MARKDOWN_V2,
-        disable_web_page_preview=True,
-    )
+        sent_preview = await _send_start_preview_video(
+            update,
+            caption=preview_caption,
+            reply_markup=_start_keyboard(),
+        )
+        if sent_preview:
+            # Welcome already sent as media + caption + buttons.
+            send_schedule_followup = False
+            text = ""
+        else:
+            text = preview_caption
+            send_schedule_followup = False
+
+    if text:
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=_start_keyboard(),
+        )
+    if send_schedule_followup:
+        await update.message.reply_text(
+            _schedule_text(),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            disable_web_page_preview=True,
+        )
 
 
 async def cmd_help(

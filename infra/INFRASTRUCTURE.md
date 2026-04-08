@@ -62,6 +62,10 @@ Rate limiting applied via `harden_servers.sh`: `limit_req_zone` 10r/s burst 20, 
 - Env file: `/etc/vacancy-mirror/backend.env`
 - Grafana provisioning: `/etc/vacancy-mirror/grafana-backend/provisioning/`
 
+Optional `/start` preview video flags in `backend.env`:
+- `START_PREVIEW_VIDEO_ENABLED=1` (set `0` to disable preview without redeploying code)
+- `START_PREVIEW_VIDEO_PATH=` (optional override path inside container; default points to bundled asset)
+
 #### Firewall (UFW)
 
 ```text

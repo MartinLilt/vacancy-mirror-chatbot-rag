@@ -51,6 +51,8 @@ CHATWOOT_ACCOUNT_ID="${CHATWOOT_ACCOUNT_ID:-}"
 CHATWOOT_INBOX_ID="${CHATWOOT_INBOX_ID:-}"
 CHATWOOT_API_ACCESS_TOKEN="${CHATWOOT_API_ACCESS_TOKEN:-}"
 CHATWOOT_WEBHOOK_TOKEN="${CHATWOOT_WEBHOOK_TOKEN:-}"
+START_PREVIEW_VIDEO_ENABLED="${START_PREVIEW_VIDEO_ENABLED:-1}"
+START_PREVIEW_VIDEO_PATH="${START_PREVIEW_VIDEO_PATH:-}"
 
 # Hetzner settings
 SERVER_TYPE="cx23"            # 2 vCPU, 4 GB RAM, x86, nbg1
@@ -206,21 +208,19 @@ apt-get update -qq
 apt-get install -y -qq iptables-persistent netfilter-persistent
 
 # Keep host default FORWARD policy strict, but allow Docker bridge egress.
+# Use interface wildcards so rules survive network re-creates (new br-<id> names).
 if ! iptables -C FORWARD -i docker0 -j ACCEPT 2>/dev/null; then
     iptables -I FORWARD 1 -i docker0 -j ACCEPT
 fi
 if ! iptables -C FORWARD -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
     iptables -I FORWARD 1 -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 fi
-
-for bridge in $(ip -o link show | awk -F': ' '/: br-/{print $2}'); do
-    if ! iptables -C FORWARD -i "$bridge" -j ACCEPT 2>/dev/null; then
-        iptables -I FORWARD 1 -i "$bridge" -j ACCEPT
-    fi
-    if ! iptables -C FORWARD -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
-        iptables -I FORWARD 1 -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-    fi
-done
+if ! iptables -C FORWARD -i br+ -j ACCEPT 2>/dev/null; then
+    iptables -I FORWARD 1 -i br+ -j ACCEPT
+fi
+if ! iptables -C FORWARD -o br+ -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+    iptables -I FORWARD 1 -o br+ -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+fi
 
 netfilter-persistent save
 systemctl enable netfilter-persistent >/dev/null 2>&1 || true
@@ -267,6 +267,8 @@ CHATWOOT_ACCOUNT_ID=${CHATWOOT_ACCOUNT_ID}
 CHATWOOT_INBOX_ID=${CHATWOOT_INBOX_ID}
 CHATWOOT_API_ACCESS_TOKEN=${CHATWOOT_API_ACCESS_TOKEN}
 CHATWOOT_WEBHOOK_TOKEN=${CHATWOOT_WEBHOOK_TOKEN}
+START_PREVIEW_VIDEO_ENABLED=${START_PREVIEW_VIDEO_ENABLED}
+START_PREVIEW_VIDEO_PATH=${START_PREVIEW_VIDEO_PATH}
 GRAFANA_BACKEND_PASSWORD=${GRAFANA_BACKEND_PASSWORD}
 GRAFANA_BACKEND_ROOT_URL=${GRAFANA_BACKEND_ROOT_URL}
 ENV

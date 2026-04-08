@@ -29,11 +29,15 @@ class TelegramBotScheduleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(message.calls), 1)
         args, kwargs = message.calls[0]
         text = args[0]
-        self.assertIn("Monday — Top Trends chart \\(Free\\)", text)
-        self.assertIn("Tuesday — Top 10 Roles \\(Plus\\)", text)
-        self.assertIn("Wednesday — Top 20 Technologies \\(Plus\\)", text)
-        self.assertIn("Thursday — Top 10 Profile Optimisation Tips \\(Free\\)", text)
-        self.assertIn("Friday — Top 20 Skills \\(Free\\)", text)
+        self.assertIn("📅 *Weekly reports schedule*", text)
+        self.assertIn("🟢 *Monday* — *Top Trends chart* \\(Free\\)", text)
+        self.assertIn("🔵 *Tuesday* — *Top 10 Roles* \\(Plus\\)", text)
+        self.assertIn("🟣 *Wednesday* — *Top 20 Technologies* \\(Plus\\)", text)
+        self.assertIn(
+            "🟠 *Thursday* — *Top 10 Profile Optimisation Tips* \\(Free\\)",
+            text,
+        )
+        self.assertIn("🟡 *Friday* — *Top 20 Skills* \\(Free\\)", text)
         self.assertEqual(kwargs.get("parse_mode"), ParseMode.MARKDOWN_V2)
 
     async def test_schedule_skips_message_for_not_allowed_user(self) -> None:

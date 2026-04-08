@@ -105,9 +105,9 @@ docker compose pull backend
 docker compose pull support-webhook || true
         docker compose pull assistant-infer-1 assistant-infer-2 assistant-infer-3 || true
 if docker compose config --services | grep -qx 'grafana-backend'; then
-          SERVICES="backend support-webhook grafana-backend"
+          SERVICES="postgres backend support-webhook grafana-backend"
 else
-          SERVICES="backend support-webhook"
+          SERVICES="postgres backend support-webhook"
         fi
         if docker compose config --services | grep -qx 'assistant-infer-1'; then
           SERVICES="$SERVICES assistant-infer-1"

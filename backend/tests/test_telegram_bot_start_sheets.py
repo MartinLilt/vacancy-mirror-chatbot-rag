@@ -6,15 +6,25 @@ from unittest.mock import Mock
 
 from telegram.constants import ParseMode
 
+from backend.services import telegram_bot
 from backend.services.telegram_bot import cmd_start
 
 
 class _DummyMessage:
     def __init__(self) -> None:
         self.calls: list[tuple[tuple, dict]] = []
+        self.video_calls: list[tuple[tuple, dict]] = []
 
     async def reply_text(self, *args, **kwargs):  # noqa: ANN002, ANN003
         self.calls.append((args, kwargs))
+        return None
+
+    async def reply_video(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self.video_calls.append((args, kwargs))
+        return None
+
+    async def reply_animation(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self.video_calls.append((args, kwargs))
         return None
 
 
@@ -60,6 +70,7 @@ class TelegramBotStartSheetsSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["stripe_subscription_id"], "sub_1")
         self.assertTrue(payload["last_updated"])
         self.assertEqual(len(message.calls), 2)
+        self.assertEqual(message.video_calls, [])
 
     async def test_start_preserves_first_seen_and_refreshes_last_updated(self) -> None:
         user = types.SimpleNamespace(
@@ -108,6 +119,7 @@ class TelegramBotStartSheetsSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["last_updated"])
         self.assertNotEqual(payload["last_updated"], "2026-01-01 10:00:00")
         self.assertEqual(len(message.calls), 2)
+        self.assertEqual(message.video_calls, [])
 
     async def test_start_escapes_first_name_for_markdown_v2(self) -> None:
         user = types.SimpleNamespace(
@@ -134,23 +146,50 @@ class TelegramBotStartSheetsSyncTest(unittest.IsolatedAsyncioTestCase):
 
         await cmd_start(update, context)
 
-        self.assertEqual(len(message.calls), 2)
-        first_args, first_kwargs = message.calls[0]
-        first_text = first_args[0]
-        self.assertIn("Ann\\_\\[Dev\\]\\(QA\\)\\!", first_text)
-        self.assertIn("*Coming soon: Pro Plus subscription*", first_text)
-        self.assertIn("Extended Projects Agent", first_text)
-        self.assertIn("/schedule — reports schedule", first_text)
-        self.assertEqual(first_kwargs.get("parse_mode"), ParseMode.MARKDOWN_V2)
+        self.assertEqual(len(message.video_calls), 1)
+        _video_args, video_kwargs = message.video_calls[0]
+        self.assertIn("Ann\\_\\[Dev\\]\\(QA\\)\\!", video_kwargs.get("caption", ""))
+        self.assertIn("*Vacancy Mirror*", video_kwargs.get("caption", ""))
+        self.assertIn("*Pro Plus coming soon*", video_kwargs.get("caption", ""))
+        self.assertEqual(video_kwargs.get("parse_mode"), ParseMode.MARKDOWN_V2)
+        self.assertIsNotNone(video_kwargs.get("reply_markup"))
 
-        second_args, second_kwargs = message.calls[1]
-        second_text = second_args[0]
-        self.assertIn("Monday — Top Trends chart \\(Free\\)", second_text)
-        self.assertIn("Tuesday — Top 10 Roles \\(Plus\\)", second_text)
-        self.assertIn("Wednesday — Top 20 Technologies \\(Plus\\)", second_text)
-        self.assertIn("Thursday — Top 10 Profile Optimisation Tips \\(Free\\)", second_text)
-        self.assertIn("Friday — Top 20 Skills \\(Free\\)", second_text)
-        self.assertEqual(second_kwargs.get("parse_mode"), ParseMode.MARKDOWN_V2)
+        # New users get a single media welcome post with caption + buttons.
+        self.assertEqual(message.calls, [])
+
+    async def test_start_skips_preview_video_when_disabled(self) -> None:
+        user = types.SimpleNamespace(
+            id=778,
+            first_name="Ann",
+            last_name="",
+            username="ann2",
+        )
+        message = _DummyMessage()
+        update = types.SimpleNamespace(effective_user=user, message=message)
+
+        db = Mock()
+        db.get_subscription.return_value = None
+        db.get_user_for_sheet.return_value = None
+
+        sheets = Mock()
+        context = types.SimpleNamespace(
+            bot_data={
+                "allowed_ids": {778},
+                "db": db,
+                "sheets": sheets,
+            }
+        )
+
+        prev_enabled = telegram_bot.START_PREVIEW_VIDEO_ENABLED
+        telegram_bot.START_PREVIEW_VIDEO_ENABLED = False
+        try:
+            await cmd_start(update, context)
+        finally:
+            telegram_bot.START_PREVIEW_VIDEO_ENABLED = prev_enabled
+
+        self.assertEqual(message.video_calls, [])
+        # Fallback mode (preview disabled): single text welcome post.
+        self.assertEqual(len(message.calls), 1)
 
 
 if __name__ == "__main__":
