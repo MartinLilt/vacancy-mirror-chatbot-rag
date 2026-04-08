@@ -24,25 +24,26 @@ if [[ -f "$REPO_ROOT/.env" ]]; then
     set +o allexport
 fi
 
-BACKEND_IP="178.104.113.58"
-SCRAPER_IP="178.104.110.28"
+BACKEND_IP="${BACKEND_SERVER_IP:-178.104.113.58}"
+SCRAPER_IP="${SCRAPER_SERVER_IP:-178.104.110.28}"
 SSH_KEY="$HOME/.ssh/vacancy_mirror_deploy"
+SSH_PORT="${SSH_PORT:-2222}"
 TARGET="${1:-all}"
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 ssh_backend() {
-    ssh -o StrictHostKeyChecking=no -i "$SSH_KEY" "root@${BACKEND_IP}" "$@"
+    ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" -i "$SSH_KEY" "root@${BACKEND_IP}" "$@"
 }
 ssh_scraper() {
-    ssh -o StrictHostKeyChecking=no -i "$SSH_KEY" "root@${SCRAPER_IP}" "$@"
+    ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" -i "$SSH_KEY" "root@${SCRAPER_IP}" "$@"
 }
 scp_backend() {
-    scp -o StrictHostKeyChecking=no -i "$SSH_KEY" "$1" "root@${BACKEND_IP}:$2"
+    scp -o StrictHostKeyChecking=no -P "$SSH_PORT" -i "$SSH_KEY" "$1" "root@${BACKEND_IP}:$2"
 }
 scp_scraper() {
-    scp -o StrictHostKeyChecking=no -i "$SSH_KEY" "$1" "root@${SCRAPER_IP}:$2"
+    scp -o StrictHostKeyChecking=no -P "$SSH_PORT" -i "$SSH_KEY" "$1" "root@${SCRAPER_IP}:$2"
 }
 
 # =============================================================================
@@ -130,6 +131,13 @@ ENV
     ssh_backend "mkdir -p /etc/vacancy-mirror/db"
     scp_backend "$REPO_ROOT/infra/db/init.sql" "/etc/vacancy-mirror/db/init.sql"
 
+    # Upload Grafana backend provisioning (datasources + dashboards)
+    log "[backend] Uploading grafana-backend provisioning..."
+    ssh_backend "mkdir -p /etc/vacancy-mirror/grafana-backend/provisioning"
+    scp -r -o StrictHostKeyChecking=no -P "$SSH_PORT" -i "$SSH_KEY" \
+        "$REPO_ROOT/infra/monitoring/grafana-backend/provisioning/." \
+        "root@${BACKEND_IP}:/etc/vacancy-mirror/grafana-backend/provisioning"
+
     # --- Step 6: GHCR login, pull, start ---
     log "[backend] Logging into GHCR and pulling fresh images..."
     ssh_backend "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin"
@@ -206,6 +214,13 @@ ENV
     scp_scraper "$REPO_ROOT/infra/db/init.sql" "/etc/vacancy-mirror/db/init.sql"
     scp_scraper "$REPO_ROOT/infra/monitoring/prometheus.yml" "/etc/vacancy-mirror/prometheus.yml"
 
+    # Upload Grafana provisioning (datasources + dashboards)
+    log "[scraper] Uploading grafana provisioning..."
+    ssh_scraper "mkdir -p /etc/vacancy-mirror/grafana/provisioning"
+    scp -r -o StrictHostKeyChecking=no -P "$SSH_PORT" -i "$SSH_KEY" \
+        "$REPO_ROOT/infra/monitoring/grafana/provisioning/." \
+        "root@${SCRAPER_IP}:/etc/vacancy-mirror/grafana/provisioning"
+
     # --- Step 6: GHCR login, pull, start ---
     log "[scraper] Logging into GHCR and pulling fresh images..."
     ssh_scraper "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin"
@@ -236,7 +251,7 @@ REMOTE
 check_host_security() {
     local ip="$1" name="$2"
     log "[$name] Checking host-level security on $ip..."
-    ssh -o StrictHostKeyChecking=no -i "$SSH_KEY" "root@${ip}" bash <<'REMOTE'
+    ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" -i "$SSH_KEY" "root@${ip}" bash <<'REMOTE'
 echo "=== Cron jobs ==="
 ls -la /etc/cron.d/ 2>/dev/null || true
 crontab -l 2>/dev/null || echo "(no root crontab)"

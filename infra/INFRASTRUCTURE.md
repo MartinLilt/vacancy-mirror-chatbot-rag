@@ -1,18 +1,20 @@
 # Infrastructure Overview
 
-Last updated: 2026-04-07
+Last updated: 2026-04-08
 
 ## Servers
 
 | Server | IP | Primary Role |
 |--------|----|--------------|
-| Backend | `178.104.113.58` | Telegram bot, Stripe/support webhooks, Chatwoot, Grafana, PostgreSQL |
-| Scraper | `178.104.110.28` | Scraper, FlareSolverr, Prometheus, Grafana, PostgreSQL |
+| Backend | `178.104.113.58` | Telegram bot, assistant-infer (×3), Stripe/support webhooks, FastAPI, Chatwoot, Grafana, PostgreSQL |
+| Scraper | `178.104.110.28` | Scraper (cron + API), FlareSolverr, Prometheus, Grafana, PostgreSQL |
 
-SSH access (key-only, passwords disabled):
+Both servers: **CX23** (2 vCPU / 4 GB RAM), Ubuntu 24.04, Hetzner Nuremberg (`nbg1`).
+
+SSH access (key-only, port **2222**, passwords disabled):
 ```bash
-ssh -i ~/.ssh/vacancy_mirror_deploy root@178.104.113.58   # backend
-ssh -i ~/.ssh/vacancy_mirror_deploy root@178.104.110.28   # scraper
+ssh -i ~/.ssh/vacancy_mirror_deploy -p 2222 root@178.104.113.58   # backend
+ssh -i ~/.ssh/vacancy_mirror_deploy -p 2222 root@178.104.110.28   # scraper
 ```
 
 ---
@@ -25,29 +27,38 @@ ssh -i ~/.ssh/vacancy_mirror_deploy root@178.104.110.28   # scraper
 
 | Service | Type | Port | Access | Purpose |
 |---------|------|------|--------|---------|
-| **nginx** | Host (systemd) | `0.0.0.0:80` | Public | Reverse proxy for `/webhook` and `/pay/*` |
+| **nginx** | Host (systemd) | `0.0.0.0:80/443` | Public | Reverse proxy → support-webhook, api. TLS via Let's Encrypt (`api.vacancy-mirror.com`) |
 | **backend** (Telegram bot) | Docker | — | Internal only | Telegram long-polling worker |
+| **assistant-infer-1/2/3** | Docker | `8090` (internal) | Internal only | Horizontal assistant inference replicas. Backend load-balances via `ASSISTANT_INFER_URLS` |
 | **support-webhook** | Docker | `127.0.0.1:8080` | Localhost only | Stripe webhook + support endpoints |
+| **api** | Docker | expose `8000` (internal) | Via nginx | FastAPI web API (for frontend) |
 | **postgres** (pgvector) | Docker | `127.0.0.1:5432` | Localhost only | Product DB |
-| **grafana-backend** | Docker | `127.0.0.1:3001` | Localhost only | Backend monitoring |
+| **grafana-backend** | Docker | `127.0.0.1:3001` | Localhost only | Backend monitoring (datasource: PostgreSQL) |
 | **chatwoot-rails** | Docker | `127.0.0.1:3002` | Localhost only | Support UI |
 | **chatwoot-sidekiq** | Docker | — | Internal only | Chatwoot worker queue |
 | **chatwoot-redis** | Docker | — | Internal only | Chatwoot cache/queue store |
 | **chatwoot-postgres** | Docker | — | Internal only | Chatwoot DB |
 
+All containers use `security_opt: no-new-privileges`, `cap_drop: ALL`, `read_only: true` (with tmpfs for `/tmp` and `/run`). Postgres gets minimal caps (CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER).
+
 #### Nginx (host-level)
 
-Located at `/etc/nginx/sites-enabled/vacancy-mirror`:
+Config source: `infra/deploy/nginx.conf` → deployed to `/etc/vacancy-mirror/nginx.conf`
 
-- `vacancy-mirror.com /webhook` -> `http://127.0.0.1:8080/webhook`
-- `vacancy-mirror.com /pay/` -> `http://127.0.0.1:8080`
-- `vacancy-mirror.com /` -> redirect to `https://vacancy-mirror.com` (Vercel)
+Routes on `api.vacancy-mirror.com`:
+- Port 80 → 301 redirect to HTTPS (+ ACME challenge passthrough)
+- `https://…/webhook` → `http://support-webhook:8080` (Stripe webhook)
+- `https://…/support/` → `http://support-webhook:8080` (support API)
+- `https://…/` → `http://api:8000` (FastAPI web API)
+
+Rate limiting applied via `harden_servers.sh`: `limit_req_zone` 10r/s burst 20, connection limits, security headers (X-Frame-Options, X-Content-Type-Options, server_tokens off).
 
 #### Compose and env (production)
 
 - Compose file on server: `/etc/vacancy-mirror/docker-compose.yml`
 - Source in repo: `infra/deploy/docker-compose.backend.yml`
 - Env file: `/etc/vacancy-mirror/backend.env`
+- Grafana provisioning: `/etc/vacancy-mirror/grafana-backend/provisioning/`
 
 #### Firewall (UFW)
 
@@ -55,34 +66,38 @@ Located at `/etc/nginx/sites-enabled/vacancy-mirror`:
 Status: active
 Default: deny incoming, allow outgoing
 
-22/tcp    ALLOW    Anywhere    # SSH
-80/tcp    ALLOW    Anywhere    # HTTP
-443/tcp   ALLOW    Anywhere    # HTTPS (reserved for future SSL)
+2222/tcp  ALLOW    Anywhere    # SSH
+80/tcp    ALLOW    Anywhere    # HTTP nginx
+443/tcp   ALLOW    Anywhere    # HTTPS nginx
 ```
+
+---
 
 ### Scraper Server (Production) `178.104.110.28`
 
 #### Services
 
-| Service | Type | Port | Access |
-|---------|------|------|--------|
-| **scraper** | Docker | `127.0.0.1:8000` | Localhost only |
-| **flaresolverr** | Docker | `127.0.0.1:8191` | Localhost only |
-| **postgres** | Docker | `127.0.0.1:5432` | Localhost only |
-| **prometheus** | Docker | `127.0.0.1:9090` | Localhost only |
-| **grafana** | Docker | `127.0.0.1:3000` | Localhost only |
-| **node-exporter** | Docker | — | Internal only |
+| Service | Type | Port | Access | Purpose |
+|---------|------|------|--------|---------|
+| **scraper** | Docker | `127.0.0.1:8000` | Localhost only | supervisord: (1) cron (chaos scraper hourly 8–22 Mon–Sat, proxy usage every 15m), (2) uvicorn scraper_api :8000 |
+| **flaresolverr** | Docker | `127.0.0.1:8191` | Localhost only | Cloudflare bypass for scraping |
+| **postgres** | Docker | `127.0.0.1:5432` | Localhost only | Scraper DB (raw_jobs, scrape_runs, proxy_usage_snapshots) |
+| **prometheus** | Docker | `127.0.0.1:9090` | Localhost only | Metrics collection (scrapes node-exporter + self, 15s interval, 30d retention) |
+| **grafana** | Docker | `127.0.0.1:3000` | Localhost only | Scraper monitoring (datasources: Prometheus + PostgreSQL) |
+| **node-exporter** | Docker | — | Internal only | Host metrics exporter |
 
 #### Compose and env (scraper)
 
 - Compose file on server: `/etc/vacancy-mirror/docker-compose.yml`
 - Source in repo: `infra/deploy/docker-compose.server2.yml`
 - Env file: `/etc/vacancy-mirror/.env`
+- Grafana provisioning: `/etc/vacancy-mirror/grafana/provisioning/`
+- Prometheus config: `/etc/vacancy-mirror/prometheus.yml`
 
-#### Cron
+#### Cron (host-level)
 
 ```text
-0 2 * * *  /etc/vacancy-mirror/rotate_webshare_proxy.sh
+0 2 * * *  /etc/vacancy-mirror/rotate_webshare_proxy.sh   # daily proxy credential rotation
 ```
 
 #### Firewall (UFW)
@@ -91,8 +106,180 @@ Default: deny incoming, allow outgoing
 Status: active
 Default: deny incoming, allow outgoing
 
-22/tcp    ALLOW    Anywhere    # SSH
+2222/tcp  ALLOW    Anywhere    # SSH
 ```
+
+---
+
+## Security Hardening (applied 2026-04-07)
+
+Applied via `infra/deploy/harden_servers.sh`, then `nuke_and_redeploy.sh` for clean re-deploy.
+
+### What was done
+
+1. **Squid open proxy removed** — `*:3128` was exposed publicly; package purged.
+2. **SSH hardened** — Port moved to **2222**, password auth disabled, key-only (`PermitRootLogin prohibit-password`), MaxAuthTries 3, X11 disabled, idle timeout 10 min.
+3. **UFW firewall** — Default deny incoming. Backend: 2222 + 80 + 443. Scraper: 2222 only.
+4. **fail2ban** — Enabled on sshd port 2222. 3 retries → 2-hour ban, 10-min find window.
+5. **Unattended security upgrades** — Automatic daily security patches (no auto-reboot).
+6. **auditd** — Monitoring: `/etc/passwd`, `/etc/shadow`, `/etc/ssh/sshd_config`, `/etc/vacancy-mirror/`, docker socket/binary, user management, cron files.
+7. **Suspicious packages removed** — squid, telnetd, rpcbind, avahi-daemon, cups purged; scan for executables in `/tmp`, `/var/tmp`, `/dev/shm`.
+8. **File permissions** — Env files `chmod 600`, vacancy-mirror dir `chmod 700`, docker socket `chmod 660`.
+9. **Nginx rate limiting** (backend) — `limit_req_zone` 10r/s burst 20, connection limits, security headers.
+10. **Docker container hardening** — All containers: `no-new-privileges`, `cap_drop: ALL`, `read_only: true` (where applicable). All ports bound to `127.0.0.1`.
+11. **Full nuke & redeploy** — All containers/images/networks/cache destroyed, fresh images pulled from GHCR. Named volumes (postgres-data, grafana-data) preserved. Fresh env files uploaded.
+
+### Network Isolation (applied 2026-04-08)
+
+Applied via `infra/deploy/lockdown_network.sh`. Defense-in-depth against Docker-bypasses-UFW and container-downloads-malware threats.
+
+#### Docker daemon (`/etc/docker/daemon.json`)
+- **`userland-proxy: false`** — Docker uses iptables NAT instead of `docker-proxy` processes. Without this, `docker-proxy` listens on published ports and bypasses all iptables rules.
+- **`no-new-privileges: true`** — Enforced by daemon for all containers.
+- **`live-restore: true`** — Containers survive daemon restarts.
+- **Log limits** — 10MB × 3 files per container (prevents disk exhaustion).
+
+#### DOCKER-USER iptables chain (blocks external → container)
+Docker inserts its own rules in iptables FORWARD chain, bypassing UFW's INPUT chain. The DOCKER-USER chain is the only place where custom rules are respected by Docker:
+- Allow established/related connections (return traffic)
+- Allow loopback (host → container via `127.0.0.1` published ports)
+- Allow Docker inter-container traffic (172.16.0.0/12 ↔ 172.16.0.0/12)
+- Allow container → internet only on ports **443, 80, 587, 53** (HTTPS, HTTP, SMTP, DNS)
+- **DROP + LOG everything else** (external→container inbound, container→weird ports)
+
+#### Docker internal networks
+Containers that don't need internet are on `internal: true` networks (physically no route to internet):
+
+| Server | Container | Networks | Internet |
+|--------|-----------|----------|----------|
+| Backend | postgres | `internal` | ❌ Blocked |
+| Backend | grafana-backend | `internal` | ❌ Blocked |
+| Backend | backend | `internal` + `egress` | ✅ 443/80/587/53 only |
+| Backend | assistant-infer-1/2/3 | `internal` + `egress` | ✅ 443/80/587/53 only |
+| Backend | support-webhook | `internal` + `egress` | ✅ 443/80/587/53 only |
+| Backend | api | `internal` + `egress` | ✅ 443/80/587/53 only |
+| Scraper | postgres | `internal` | ❌ Blocked |
+| Scraper | prometheus | `internal` | ❌ Blocked |
+| Scraper | node-exporter | `internal` | ❌ Blocked |
+| Scraper | grafana | `internal` | ❌ Blocked |
+| Scraper | scraper | `internal` + `egress` | ✅ 443/80/587/53 only |
+| Scraper | flaresolverr | `internal` + `egress` | ✅ 443/80/587/53 only |
+
+#### Security layers (defense in depth)
+
+```
+Layer 1: UFW                  — deny incoming (except SSH 2222 + nginx 80/443)
+Layer 2: DOCKER-USER iptables — block external→container forwarding (Docker bypass fix)
+Layer 3: userland-proxy=false — no iptables-bypassing docker-proxy processes
+Layer 4: internal networks    — postgres/grafana/prometheus physically can't reach internet
+Layer 5: outbound port limit  — containers limited to ports 443/80/587/53 only
+Layer 6: container hardening  — read_only, no-new-privileges, cap_drop ALL
+```
+
+### Port exposure summary (production)
+
+| Port | Backend | Scraper |
+|------|---------|---------|
+| 2222 (SSH) | Public (key-only, fail2ban) | Public (key-only, fail2ban) |
+| 80 (HTTP) | Public (nginx → redirect to HTTPS) | Closed |
+| 443 (HTTPS) | Public (nginx → api/webhooks) | Closed |
+| 3000-3002 | Localhost only | Localhost only |
+| 5432 | Localhost only | Localhost only |
+| 8000 | Internal (via nginx) | Localhost only |
+| 8080 | Localhost only | — |
+| 8090 | Internal (assistant-infer) | — |
+| 8191 | — | Localhost only |
+| 9090 | — | Localhost only |
+
+---
+
+## Deployment Commands
+
+### Normal deploy (build → push → restart)
+
+```bash
+# One-command: build, push to GHCR, restart on server
+bash ship.sh backend              # backend only
+bash ship.sh scraper              # scraper only
+bash ship.sh all                  # everything
+bash ship.sh backend --no-cache   # force full rebuild
+
+# Or separately:
+bash infra/deploy/push-images.sh backend    # build + push image
+bash infra/deploy/deploy.sh backend         # pull + restart on server
+bash infra/deploy/deploy.sh scraper
+bash infra/deploy/deploy.sh all
+```
+
+### Incident response (nuke & redeploy)
+
+```bash
+# Full wipe: destroy all containers/images, upload fresh env + compose, redeploy
+bash infra/deploy/nuke_and_redeploy.sh backend
+bash infra/deploy/nuke_and_redeploy.sh scraper
+bash infra/deploy/nuke_and_redeploy.sh all
+```
+
+⚠️ Preserves Docker named volumes (DB data, Grafana data). Destroys all containers, images, networks, build cache.
+
+### Security hardening
+
+```bash
+bash infra/deploy/harden_servers.sh backend
+bash infra/deploy/harden_servers.sh scraper
+bash infra/deploy/harden_servers.sh all
+```
+
+⚠️ After running, SSH port changes to 2222.
+
+### Network lockdown (Docker isolation + iptables)
+
+```bash
+# Audit only (check what's exposed, no changes)
+bash infra/deploy/lockdown_network.sh audit both
+
+# Apply fixes (Docker daemon, iptables DOCKER-USER, internal networks)
+bash infra/deploy/lockdown_network.sh fix both
+
+# Audit + fix + verify
+bash infra/deploy/lockdown_network.sh all both
+```
+
+⚠️ Restarts Docker daemon and all containers. Containers on `internal` network lose internet access.
+
+### SSL certificate
+
+```bash
+bash infra/deploy/setup-ssl.sh    # one-time Let's Encrypt cert for api.vacancy-mirror.com
+```
+
+### Scraper proxy rotation
+
+```bash
+# Runs daily at 02:00 UTC via cron on scraper server
+# Manual trigger:
+ssh -i ~/.ssh/vacancy_mirror_deploy -p 2222 root@178.104.110.28 '/etc/vacancy-mirror/rotate_webshare_proxy.sh'
+```
+
+---
+
+## Database Schema
+
+Both servers run independent PostgreSQL (pgvector) instances with the same schema.
+
+| Table | Purpose |
+|-------|---------|
+| `scrape_runs` | Audit log of every scraper execution (status, pages, jobs stats, errors) |
+| `raw_jobs` | Raw Upwork job postings (title, description, skills[], budget, client info, ciphertext). Unique by (category_uid, job_uid) |
+| `profiles` | Named role profiles per category/cluster (role_name, demand_type: broad/niche/exotic, demand_ratio) |
+| `profile_embeddings` | vector(1024) embeddings (BAAI/bge-large-en-v1.5) for RAG semantic search. IVFFlat index |
+| `job_samples` | Individual job postings linked to a profile (RAG context) |
+| `subscriptions` | Telegram user → Stripe subscription (plan: free/plus/pro_plus, status: active/cancelled/past_due) |
+| `proxy_usage_snapshots` | Webshare proxy usage telemetry (requests, bytes, raw JSON) |
+| `support_feedback_events` | Contact Support submissions from Telegram (user info, message, reply channel, status, Chatwoot link) |
+| `support_replies` | Operator reply delivery log (channel: telegram/email, source: support_api/chatwoot, status: sent/failed) |
+
+Extension: `pgvector` (vector similarity search).
 
 ---
 
@@ -146,7 +333,7 @@ docker build -t ghcr.io/<GHCR_USER>/vacancy-mirror-backend:dev ./backend
 docker push ghcr.io/<GHCR_USER>/vacancy-mirror-backend:dev
 
 # 2) On backend server, deploy only dev stack
-ssh -i ~/.ssh/vacancy_mirror_deploy root@178.104.113.58
+ssh -i ~/.ssh/vacancy_mirror_deploy -p 2222 root@178.104.113.58
 cd /etc/vacancy-mirror-dev
 docker compose pull
 docker compose up -d
@@ -164,43 +351,10 @@ docker compose up -d
 
 ---
 
-## Security Hardening (applied 2026-04-07)
+## Known Issues & TODO
 
-1. Squid open proxy removed (`*:3128`).
-2. SSH password auth disabled; key-only access.
-3. UFW enabled with deny-incoming default.
-4. Docker services bound to `127.0.0.1` where applicable.
-5. Host nginx used as the only reverse proxy entrypoint.
-
-### Port exposure summary (production)
-
-| Port | Backend | Scraper |
-|------|---------|---------|
-| 22 (SSH) | Public (key-only) | Public (key-only) |
-| 80 (HTTP) | Public (nginx) | Closed |
-| 443 (HTTPS) | Allowed by UFW (cert pending) | Closed |
-| 3000-3002 | Localhost only | Localhost only |
-| 5432 | Localhost only | Localhost only |
-| 8000 | — | Localhost only |
-| 8080 | Localhost only | — |
-| 8191 | — | Localhost only |
-| 9090 | — | Localhost only |
-
----
-
-## Deployment Commands
-
-### Production deploy
-
-```bash
-bash infra/deploy/deploy.sh backend
-bash infra/deploy/deploy.sh scraper
-bash infra/deploy/deploy.sh all
-```
-
-### Scraper proxy rotation (production)
-
-```bash
-ssh -i ~/.ssh/vacancy_mirror_deploy root@178.104.110.28 '/etc/vacancy-mirror/rotate_webshare_proxy.sh'
-```
-
+1. ~~`rotate_webshare_proxy.sh` has a hardcoded API key`~~ — **FIXED** (2026-04-08). Now sources `WEBSHARE_API_KEY` from `/etc/vacancy-mirror/.env`.
+2. ~~`setup-ssl.sh` missing `-p 2222`~~ — **FIXED** (2026-04-08). Uses `SSH_PORT` env var (default 2222).
+3. ~~No certbot auto-renewal~~ — **FIXED** (2026-04-08). `setup-ssl.sh` now installs a cron job (`0 3,15 * * * certbot renew`) with pre/post hooks to stop/start nginx.
+4. ~~`docker-compose.server1.yml` is legacy~~ — **Marked deprecated** (2026-04-08). Header says "DO NOT deploy — use `docker-compose.backend.yml`".
+5. **Two independent Postgres instances** — no replication. Scraper data is accessed via `scraper_api` HTTP endpoint from backend. This is by design (isolation), not a bug.

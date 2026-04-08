@@ -8,6 +8,10 @@
 #   api               — FastAPI (web/api, pulls from ghcr.io)
 #   grafana-backend   — monitoring dashboard (port 3001, localhost only)
 #
+# Networks:
+#   internal — no internet access (postgres, grafana)
+#   egress   — internet access   (backend, assistant-infer, support-webhook, api)
+#
 # Reverse proxy: host-level nginx (systemd) on port 80/443
 
 services:
@@ -42,6 +46,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - internal
 
   backend:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
@@ -60,6 +66,9 @@ services:
       postgres:
         condition: service_healthy
     command: python -m backend.cli telegram-bot
+    networks:
+      - internal   # → postgres, assistant-infer
+      - egress     # → api.telegram.org, api.openai.com
 
   # Horizontal assistant inference replicas.
   # Backend can call them via:
@@ -81,6 +90,9 @@ services:
       postgres:
         condition: service_healthy
     command: python -m backend.cli assistant-infer --port 8090
+    networks:
+      - internal   # → postgres
+      - egress     # → api.openai.com
 
   assistant-infer-2:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
@@ -99,6 +111,9 @@ services:
       postgres:
         condition: service_healthy
     command: python -m backend.cli assistant-infer --port 8090
+    networks:
+      - internal
+      - egress
 
   assistant-infer-3:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
@@ -117,6 +132,9 @@ services:
       postgres:
         condition: service_healthy
     command: python -m backend.cli assistant-infer --port 8090
+    networks:
+      - internal
+      - egress
 
   support-webhook:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
@@ -137,6 +155,9 @@ services:
       postgres:
         condition: service_healthy
     command: python -m backend.cli stripe-webhook --port 8080
+    networks:
+      - internal   # → postgres
+      - egress     # → api.stripe.com, sendgrid, telegram
 
   api:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-api:latest
@@ -156,6 +177,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - internal   # → postgres
+      - egress     # → may need external APIs
 
 
   grafana-backend:
@@ -177,6 +201,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - internal   # → postgres only. NO internet access.
+
+networks:
+  internal:
+    driver: bridge
+    internal: true     # ← No internet access from this network
+  egress:
+    driver: bridge     # ← Normal bridge with internet access
 
 volumes:
   postgres-data:

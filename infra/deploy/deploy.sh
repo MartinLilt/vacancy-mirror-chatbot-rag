@@ -37,6 +37,7 @@ SCRAPER_SERVER_IP="${SCRAPER_SERVER_IP:?Set SCRAPER_SERVER_IP in .env}"
 TARGET="${1:-backend}"   # backend | scraper | all
 
 SSH_KEY_PATH="$HOME/.ssh/vacancy_mirror_deploy"
+SSH_PORT="${SSH_PORT:-2222}"
 BACKEND_IMAGE="ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest"
 SCRAPER_IMAGE="ghcr.io/${GHCR_USER}/vacancy-mirror-scraper:latest"
 
@@ -48,12 +49,14 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 run_remote() {
     ssh -o StrictHostKeyChecking=no \
+        -p "$SSH_PORT" \
         -i "$SSH_KEY_PATH" \
         "root@${BACKEND_SERVER_IP}" "$@"
 }
 
 run_remote_scraper() {
     ssh -o StrictHostKeyChecking=no \
+        -p "$SSH_PORT" \
         -i "$SSH_KEY_PATH" \
         "root@${SCRAPER_SERVER_IP}" "$@"
 }
@@ -61,6 +64,7 @@ run_remote_scraper() {
 copy_to_backend() {
     local src="$1" dst="$2"
     scp -o StrictHostKeyChecking=no \
+        -P "$SSH_PORT" \
         -i "$SSH_KEY_PATH" \
         "$src" "root@${BACKEND_SERVER_IP}:$dst"
 }
@@ -68,6 +72,7 @@ copy_to_backend() {
 copy_dir_to_backend() {
     local src="$1" dst="$2"
     scp -r -o StrictHostKeyChecking=no \
+        -P "$SSH_PORT" \
         -i "$SSH_KEY_PATH" \
         "$src/." "root@${BACKEND_SERVER_IP}:$dst"
 }

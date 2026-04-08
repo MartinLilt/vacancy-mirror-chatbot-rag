@@ -25,7 +25,13 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-WEBSHARE_API_KEY="lwd7w2a77yee62do7urvxyr2tyjanplsfnmgavtk"
+# Source env vars from compose .env (contains WEBSHARE_API_KEY)
+if [ -f /etc/vacancy-mirror/.env ]; then
+    set -o allexport
+    source /etc/vacancy-mirror/.env
+    set +o allexport
+fi
+WEBSHARE_API_KEY="${WEBSHARE_API_KEY:?WEBSHARE_API_KEY not set in /etc/vacancy-mirror/.env}"
 WEBSHARE_API_URL="https://proxy.webshare.io/api/v2/proxy/config/"
 WEBSHARE_HOST="p.webshare.io"
 WEBSHARE_PORT="80"

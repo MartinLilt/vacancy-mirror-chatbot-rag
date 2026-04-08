@@ -1,5 +1,14 @@
 version: "3.9"
 # =============================================================================
+# ⚠️  LEGACY — superseded by docker-compose.backend.yml
+# This file is kept for reference only. DO NOT deploy.
+# Use docker-compose.backend.yml which adds:
+#   - internal/egress network isolation
+#   - security_opt, cap_drop, read_only hardening
+#   - assistant-infer horizontal replicas
+#   - api (FastAPI) service
+#   - grafana-backend service
+# =============================================================================
 # Server 1 (178.104.113.58) — Backend stack
 # Services: postgres (pgvector), backend (Telegram bot + RAG + embeddings)
 # =============================================================================
