@@ -9,7 +9,7 @@ BACKEND_SERVER="root@178.104.113.58"
 SCRAPER_SERVER="root@178.104.110.28"
 PROJECT_DIR="/opt/vacancy-mirror"
 SSH_KEY="$HOME/.ssh/vacancy_mirror_deploy"
-PROXY="http://yredwczd-1-country-US-session-upwork123:1500jnrpopto@p.webshare.io:80"
+PROXY="${PROXY_URL:-}"
 
 echo "=== Phase 2 Deployment ==="
 echo "Scraper: $SCRAPER_SERVER | Backend: $BACKEND_SERVER"

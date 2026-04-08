@@ -9,6 +9,16 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
     environment:
       POSTGRES_DB: vacancy_mirror
       POSTGRES_USER: app
@@ -29,6 +39,8 @@ services:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       LOG_LEVEL: info
       LOG_HTML: false
@@ -45,6 +57,8 @@ services:
     image: ghcr.io/martinlilt/vacancy-mirror-scraper:latest
     container_name: scraper
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       # Local postgres (on this same server)
       DATABASE_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
@@ -81,6 +95,8 @@ services:
     image: prom/prometheus:latest
     container_name: prometheus
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - /etc/vacancy-mirror/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -94,6 +110,10 @@ services:
     image: prom/node-exporter:latest
     container_name: node-exporter
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     pid: host
     volumes:
       - /proc:/host/proc:ro
@@ -108,6 +128,8 @@ services:
     image: grafana/grafana:latest
     container_name: grafana
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"

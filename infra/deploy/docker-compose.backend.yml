@@ -14,6 +14,16 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
     env_file:
       - /etc/vacancy-mirror/backend.env
     environment:
@@ -36,6 +46,14 @@ services:
   backend:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     env_file:
       - /etc/vacancy-mirror/backend.env
     depends_on:
@@ -49,6 +67,14 @@ services:
   assistant-infer-1:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     env_file:
       - /etc/vacancy-mirror/backend.env
     depends_on:
@@ -59,6 +85,14 @@ services:
   assistant-infer-2:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     env_file:
       - /etc/vacancy-mirror/backend.env
     depends_on:
@@ -69,6 +103,14 @@ services:
   assistant-infer-3:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     env_file:
       - /etc/vacancy-mirror/backend.env
     depends_on:
@@ -79,6 +121,14 @@ services:
   support-webhook:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-backend:latest
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     env_file:
       - /etc/vacancy-mirror/backend.env
     ports:
@@ -91,6 +141,14 @@ services:
   api:
     image: ghcr.io/${GHCR_USER}/vacancy-mirror-api:latest
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     env_file:
       - /etc/vacancy-mirror/backend.env
     expose:
@@ -103,6 +161,8 @@ services:
   grafana-backend:
     image: grafana/grafana:latest
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_BACKEND_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"

@@ -19,7 +19,7 @@ cp .env .env.backup.$(date +%Y%m%d-%H%M%S)
 if ! grep -q "PROXY_URL=" .env; then
     echo "" >> .env
     echo "# Phase 2: Residential Proxy + Session Persistence" >> .env
-    echo "PROXY_URL=http://yredwczd-1-country-US-session-upwork123:1500jnrpopto@p.webshare.io:80" >> .env
+    echo "PROXY_URL=\${PROXY_URL}" >> .env
     echo "CHROME_USER_DATA_DIR=/app/data/chrome_profile" >> .env
     echo "COOKIE_BACKUP_PATH=/app/data/session_cookies.json" >> .env
     echo "✅ Added Phase 2 variables to .env"
@@ -63,7 +63,7 @@ fi
 
 # 4. Test proxy connectivity
 echo "Step 4/5: Testing proxy connectivity..."
-PROXY_URL="http://yredwczd-1-country-US-session-test:1500jnrpopto@p.webshare.io:80"
+PROXY_URL="${PROXY_URL:?PROXY_URL not set}"
 PROXY_IP=$(curl --proxy "$PROXY_URL" -s https://api.ipify.org || echo "FAILED")
 
 if [[ "$PROXY_IP" == "FAILED" ]]; then
