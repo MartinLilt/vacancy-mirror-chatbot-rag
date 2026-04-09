@@ -43,7 +43,18 @@ log = logging.getLogger("scraper_api")
 # ---------------------------------------------------------------------------
 
 DATABASE_URL: str = os.environ["DATABASE_URL"]
-API_KEY: str = os.environ.get("SCRAPER_API_KEY", "changeme")
+API_KEY: str = os.environ.get("SCRAPER_API_KEY") or os.environ.get("API_KEY", "")
+
+# Security: fail fast if API key is not set or is default value
+if not API_KEY or API_KEY == "changeme":
+    log.warning(
+        "⚠️  SCRAPER_API_KEY not set or using default value! "
+        "API will be vulnerable. Set a strong random key in production."
+    )
+    if os.environ.get("PRODUCTION", "false").lower() == "true":
+        raise RuntimeError(
+            "SCRAPER_API_KEY must be set in production environment"
+        )
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -82,7 +93,32 @@ _log_buffer: collections.deque = collections.deque(maxlen=200)
 
 def require_api_key(x_api_key: str = Header(...)) -> None:
     if x_api_key != API_KEY:
+        # Log unauthorized attempts for security monitoring
+        log.warning(
+            "Unauthorized API access attempt - invalid key: %s...",
+            x_api_key[:8] if len(x_api_key) >= 8 else "***"
+        )
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def optional_api_key(x_api_key: str | None = Header(None)) -> bool:
+    """Optional API key check for read-only endpoints.
+    
+    Returns True if valid key provided, False if no key.
+    Raises 401 if invalid key provided.
+    
+    Use this for GET endpoints that should be public for monitoring
+    but can optionally require auth via X-API-Key header.
+    """
+    if x_api_key is None:
+        return False
+    if x_api_key != API_KEY:
+        log.warning(
+            "Unauthorized API access attempt - invalid key: %s...",
+            x_api_key[:8] if len(x_api_key) >= 8 else "***"
+        )
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return True
 
 
 # ---------------------------------------------------------------------------

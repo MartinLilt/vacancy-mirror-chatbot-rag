@@ -9,7 +9,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
-    "pydantic>=2.0",
+    "pydantic>=2.4.0",  # CVE-2024-3772 fix (ReDoS vulnerability)
 ]
 
 [build-system]
