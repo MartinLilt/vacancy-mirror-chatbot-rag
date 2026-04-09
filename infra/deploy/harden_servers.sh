@@ -20,8 +20,12 @@
 set -euo pipefail
 
 SSH_KEY="$HOME/.ssh/vacancy_mirror_deploy"
-BACKEND_IP="178.104.113.58"
-SCRAPER_IP="178.104.110.28"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+if [[ -f "$REPO_ROOT/.env" ]]; then
+    set -o allexport; source "$REPO_ROOT/.env"; set +o allexport
+fi
+BACKEND_IP="${BACKEND_SERVER_IP:?Set BACKEND_SERVER_IP in .env}"
+SCRAPER_IP="${SCRAPER_SERVER_IP:?Set SCRAPER_SERVER_IP in .env}"
 NEW_SSH_PORT=2222
 TARGET="${1:-all}"
 
