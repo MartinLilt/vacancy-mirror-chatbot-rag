@@ -1,0 +1,365 @@
+name: Deploy to Production
+
+# Trigger: manual button or git tag
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment target'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - backend
+          - scraper
+      confirm:
+        description: 'Type "deploy" to confirm'
+        required: true
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on version tags like v1.0.0
+
+env:
+  REGISTRY: ghcr.io
+  GHCR_USER: martinlilt
+
+jobs:
+  # ============================================================================
+  # Pre-flight checks
+  # ============================================================================
+  preflight:
+    name: Pre-flight Checks
+    runs-on: ubuntu-latest
+    outputs:
+      should_deploy: ${{ steps.check.outputs.should_deploy }}
+      deploy_target: ${{ steps.check.outputs.deploy_target }}
+    steps:
+      - name: Check confirmation
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ github.event.inputs.confirm }}" != "deploy" ]; then
+              echo "❌ Confirmation failed. Type 'deploy' to proceed."
+              exit 1
+            fi
+            echo "should_deploy=true" >> $GITHUB_OUTPUT
+            echo "deploy_target=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          else
+            # Tag push - always deploy both
+            echo "should_deploy=true" >> $GITHUB_OUTPUT
+            echo "deploy_target=both" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Display deployment info
+        run: |
+          echo "🚀 Deployment initiated"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Target: ${{ steps.check.outputs.deploy_target }}"
+          echo "Triggered by: ${{ github.event_name }}"
+
+  # ============================================================================
+  # Build Backend Image
+  # ============================================================================
+  build-backend:
+    name: Build Backend Image
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should_deploy == 'true' && (needs.preflight.outputs.deploy_target == 'both' || needs.preflight.outputs.deploy_target == 'backend')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.GHCR_USER }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.GHCR_USER }}/vacancy-mirror-backend
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================================
+  # Build API Image
+  # ============================================================================
+  build-api:
+    name: Build API Image
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should_deploy == 'true' && (needs.preflight.outputs.deploy_target == 'both' || needs.preflight.outputs.deploy_target == 'backend')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.GHCR_USER }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.GHCR_USER }}/vacancy-mirror-api
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./web/api
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================================
+  # Build Scraper Image
+  # ============================================================================
+  build-scraper:
+    name: Build Scraper Image
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should_deploy == 'true' && (needs.preflight.outputs.deploy_target == 'both' || needs.preflight.outputs.deploy_target == 'scraper')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.GHCR_USER }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.GHCR_USER }}/vacancy-mirror-scraper
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Scraper image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./scraper
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================================
+  # Deploy to Backend Server
+  # ============================================================================
+  deploy-backend:
+    name: Deploy to Backend Server
+    runs-on: ubuntu-latest
+    needs: [preflight, build-backend, build-api]
+    if: |
+      always() &&
+      needs.preflight.outputs.should_deploy == 'true' &&
+      (needs.preflight.outputs.deploy_target == 'both' || needs.preflight.outputs.deploy_target == 'backend') &&
+      needs.build-backend.result == 'success' &&
+      needs.build-api.result == 'success'
+    steps:
+      - name: Deploy to backend server
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.BACKEND_SERVER_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 2222
+          script: |
+            set -e
+            echo "🚀 Deploying to Backend Server..."
+            
+            cd /etc/vacancy-mirror
+            
+            # Pull new images
+            echo "📥 Pulling images..."
+            docker compose pull backend assistant-infer-1 assistant-infer-2 assistant-infer-3 support-webhook api
+            
+            # Recreate containers
+            echo "🔄 Recreating containers..."
+            docker compose up -d
+            
+            # Wait for containers to start
+            sleep 10
+            
+            # Check status
+            echo "📊 Container status:"
+            docker compose ps
+            
+            # Health check
+            echo "🏥 Health check:"
+            curl -sf http://localhost:8000/health || echo "Health check failed"
+            
+            # Show recent logs
+            echo "📝 Recent logs:"
+            docker compose logs --tail 20 backend
+            
+            echo "✅ Backend deployment complete!"
+
+      - name: Verify deployment
+        if: success()
+        run: |
+          echo "✅ Backend server deployed successfully"
+          echo "Server: ${{ secrets.BACKEND_SERVER_IP }}"
+          echo "Images: backend, api, assistant-infer×3, support-webhook"
+
+  # ============================================================================
+  # Deploy to Scraper Server
+  # ============================================================================
+  deploy-scraper:
+    name: Deploy to Scraper Server
+    runs-on: ubuntu-latest
+    needs: [preflight, build-scraper]
+    if: |
+      always() &&
+      needs.preflight.outputs.should_deploy == 'true' &&
+      (needs.preflight.outputs.deploy_target == 'both' || needs.preflight.outputs.deploy_target == 'scraper') &&
+      needs.build-scraper.result == 'success'
+    steps:
+      - name: Deploy to scraper server
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.SCRAPER_SERVER_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 2222
+          script: |
+            set -e
+            echo "🚀 Deploying to Scraper Server..."
+            
+            cd /etc/vacancy-mirror
+            
+            # Pull new image
+            echo "📥 Pulling scraper image..."
+            docker compose pull scraper
+            
+            # Recreate container
+            echo "🔄 Recreating scraper container..."
+            docker compose up -d scraper
+            
+            # Wait for container to start
+            sleep 5
+            
+            # Check status
+            echo "📊 Container status:"
+            docker compose ps scraper
+            
+            # Health check
+            echo "🏥 Health check:"
+            curl -sf http://localhost:8000/health || echo "Health check failed"
+            
+            # Show recent logs
+            echo "📝 Recent logs:"
+            docker compose logs --tail 20 scraper
+            
+            echo "✅ Scraper deployment complete!"
+
+      - name: Verify deployment
+        if: success()
+        run: |
+          echo "✅ Scraper server deployed successfully"
+          echo "Server: ${{ secrets.SCRAPER_SERVER_IP }}"
+          echo "Image: scraper"
+
+  # ============================================================================
+  # Post-deployment summary
+  # ============================================================================
+  summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [preflight, deploy-backend, deploy-scraper]
+    if: always() && needs.preflight.outputs.should_deploy == 'true'
+    steps:
+      - name: Generate summary
+        run: |
+          echo "# 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Target:** ${{ needs.preflight.outputs.deploy_target }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.deploy-backend.result }}" != "skipped" ]; then
+            if [ "${{ needs.deploy-backend.result }}" = "success" ]; then
+              echo "✅ **Backend Server:** Deployed successfully" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ **Backend Server:** Deployment failed" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+          
+          if [ "${{ needs.deploy-scraper.result }}" != "skipped" ]; then
+            if [ "${{ needs.deploy-scraper.result }}" = "success" ]; then
+              echo "✅ **Scraper Server:** Deployed successfully" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ **Scraper Server:** Deployment failed" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "🎉 **Deployment complete!**" >> $GITHUB_STEP_SUMMARY
+
+      - name: Report status
+        run: |
+          if [ "${{ needs.deploy-backend.result }}" = "failure" ] || [ "${{ needs.deploy-scraper.result }}" = "failure" ]; then
+            echo "❌ Deployment failed. Check logs above."
+            exit 1
+          fi
+          echo "✅ All deployments successful!"
+
