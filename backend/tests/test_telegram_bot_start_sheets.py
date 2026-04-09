@@ -69,8 +69,13 @@ class TelegramBotStartSheetsSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["stripe_customer_id"], "cus_1")
         self.assertEqual(payload["stripe_subscription_id"], "sub_1")
         self.assertTrue(payload["last_updated"])
-        self.assertEqual(len(message.calls), 2)
-        self.assertEqual(message.video_calls, [])
+        self.assertEqual(len(message.video_calls), 1)
+        _video_args, video_kwargs = message.video_calls[0]
+        self.assertIn("*Welcome back, Alex", video_kwargs.get("caption", ""))
+        self.assertIn("*⭐ Plus*", video_kwargs.get("caption", ""))
+        self.assertEqual(video_kwargs.get("parse_mode"), ParseMode.MARKDOWN_V2)
+        self.assertEqual(len(message.calls), 1)
+        self.assertIn("📅 *Weekly reports schedule*", message.calls[0][0][0])
 
     async def test_start_preserves_first_seen_and_refreshes_last_updated(self) -> None:
         user = types.SimpleNamespace(
@@ -118,8 +123,13 @@ class TelegramBotStartSheetsSyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["first_seen"], "2026-01-01 10:00:00")
         self.assertTrue(payload["last_updated"])
         self.assertNotEqual(payload["last_updated"], "2026-01-01 10:00:00")
-        self.assertEqual(len(message.calls), 2)
-        self.assertEqual(message.video_calls, [])
+        self.assertEqual(len(message.video_calls), 1)
+        _video_args, video_kwargs = message.video_calls[0]
+        self.assertIn("*Welcome back, Mila", video_kwargs.get("caption", ""))
+        self.assertIn("*🚀 Pro Plus*", video_kwargs.get("caption", ""))
+        self.assertEqual(video_kwargs.get("parse_mode"), ParseMode.MARKDOWN_V2)
+        self.assertEqual(len(message.calls), 1)
+        self.assertIn("📅 *Weekly reports schedule*", message.calls[0][0][0])
 
     async def test_start_escapes_first_name_for_markdown_v2(self) -> None:
         user = types.SimpleNamespace(

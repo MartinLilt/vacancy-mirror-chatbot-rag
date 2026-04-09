@@ -60,6 +60,7 @@ from backend.services.assistant_infer_client import AssistantInferClient
 from backend.services.openai import OpenAIMarketAssistantService
 from backend.services.postgres import PostgresJobExportService
 from backend.services.reasoning_orchestrator import ReasoningOrchestrator
+from backend.services.assistant_knowledge import AssistantSectionRetriever
 
 log = logging.getLogger(__name__)
 
@@ -266,6 +267,29 @@ def _strip_telegram_markdown(text: str) -> str:
     return value
 
 
+def _build_degraded_assistant_reply(question: str) -> str:
+    """Build a short deterministic fallback reply when LLM providers fail."""
+    retriever = AssistantSectionRetriever()
+    sections = retriever.retrieve(query=question, top_k=2)
+    if not sections:
+        return (
+            "⚠️ Assistant is temporarily unavailable right now. "
+            "Please retry in 1-2 minutes."
+        )
+
+    lines = [
+        "⚠️ Assistant providers are temporarily unavailable.",
+        "Quick guidance from built-in knowledge:",
+    ]
+    for section in sections:
+        snippet = section.content.strip()
+        if len(snippet) > 180:
+            snippet = snippet[:177].rstrip() + "..."
+        lines.append(f"• {section.title}: {snippet}")
+    lines.append("Please retry in 1-2 minutes for a full AI answer.")
+    return "\n".join(lines)
+
+
 async def _safe_edit_text(
     message: object,
     text: str,
@@ -391,7 +415,6 @@ async def _send_start_preview_video(
                 caption=caption,
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=reply_markup,
-                supports_streaming=True,
             )
         return True
     except Exception as exc:  # noqa: BLE001
@@ -553,12 +576,21 @@ async def cmd_start(
             if sub["plan"] == "plus"
             else "🚀 Pro Plus"
         )
-        text = (
+        active_caption = (
             f"👋 *Welcome back, {safe_first_name}\\!*\n\n"
             f"✅ Your *{plan_label}* subscription is active\\.\n"
             "All your features are ready to use\\.\n\n"
             "Pick an option below 👇"
         )
+        sent_preview = await _send_start_preview_video(
+            update,
+            caption=active_caption,
+            reply_markup=_start_keyboard(),
+        )
+        if sent_preview:
+            text = ""
+        else:
+            text = active_caption
         send_schedule_followup = True
     else:
         # Keep this under Telegram media-caption limits so welcome + buttons
@@ -647,9 +679,14 @@ async def trial_receive_query(
         return ConversationHandler.END
 
     prompt = (update.message.text or "").strip()
+    reply_to_message_id = int(getattr(update.message, "message_id", 0) or 0)
+    reply_kwargs: dict[str, int] = {}
+    if reply_to_message_id > 0:
+        reply_kwargs["reply_to_message_id"] = reply_to_message_id
     if not prompt:
         await update.message.reply_text(
-            "⚠️ Please send a non-empty message."
+            "⚠️ Please send a non-empty message.",
+            **reply_kwargs,
         )
         return TRIAL_WAITING_QUERY
 
@@ -681,13 +718,15 @@ async def trial_receive_query(
     acquired_global_slot = False
     started_at = 0.0
     success = False
+    fail_reasons: list[str] = []
     if per_user_guard_enabled:
         user_lock = runtime.lock_for_user(user.id)
         if user_lock.locked():
             runtime.user_busy_rejections += 1
             await update.message.reply_text(
                 "⏳ I am still processing your previous message. "
-                "Please wait a few seconds and try again."
+                "Please wait a few seconds and try again.",
+                **reply_kwargs,
             )
             return TRIAL_WAITING_QUERY
         await user_lock.acquire()
@@ -702,7 +741,8 @@ async def trial_receive_query(
         except asyncio.TimeoutError:
             runtime.overload_rejections += 1
             await update.message.reply_text(
-                "⚠️ High load right now. Please retry in 10-20 seconds."
+                "⚠️ High load right now. Please retry in 10-20 seconds.",
+                **reply_kwargs,
             )
             return TRIAL_WAITING_QUERY
 
@@ -721,7 +761,16 @@ async def trial_receive_query(
         except Exception:  # noqa: BLE001
             pass
 
-        used = db.count_bot_chat_requests_last_24h(user.id)
+        try:
+            used = db.count_bot_chat_requests_last_24h(user.id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "Failed to count trial chat requests for user_id=%s: %s",
+                user.id,
+                exc,
+            )
+            # Keep assistant responsive even when usage counter storage is down.
+            used = 0
         if used >= limit:
             donate_keyboard = InlineKeyboardMarkup([
                 [
@@ -739,11 +788,13 @@ async def trial_receive_query(
                     f"{TRIAL_FOOTER}"
                 ),
                 reply_markup=donate_keyboard,
+                **reply_kwargs,
             )
             return TRIAL_WAITING_QUERY
 
         thinking = await update.message.reply_text(
-            "🤖 Assistant is thinking..."
+            "🤖 Assistant is thinking...",
+            **reply_kwargs,
         )
 
         last_status = ""
@@ -790,6 +841,9 @@ async def trial_receive_query(
                         timeout=max(1.0, remote_timeout_sec + 2.0),
                     )
                 except Exception as remote_exc:  # noqa: BLE001
+                    fail_reasons.append(
+                        f"remote_infer={type(remote_exc).__name__}: {remote_exc}"
+                    )
                     log.warning("Remote assistant infer failed, fallback local: %s", remote_exc)
 
             # Local fallback path keeps backward compatibility.
@@ -840,6 +894,7 @@ async def trial_receive_query(
                     )
                     route = "simple"
         except Exception as exc:  # noqa: BLE001
+            fail_reasons.append(f"primary_path={type(exc).__name__}: {exc}")
             log.exception("Trial chat failed: %s", exc)
             try:
                 timeout_sec = float(
@@ -854,11 +909,29 @@ async def trial_receive_query(
                 )
                 route = "simple"
             except Exception as fallback_exc:  # noqa: BLE001
-                log.exception("Trial chat fallback failed: %s", fallback_exc)
-                await thinking.edit_text(
-                    "⚠️ Sorry, something went wrong while generating the answer."
-                    " Please try again."
+                fail_reasons.append(
+                    f"simple_fallback={type(fallback_exc).__name__}: {fallback_exc}"
                 )
+                log.exception("Trial chat fallback failed: %s", fallback_exc)
+                log.error(
+                    "Trial chat degraded fallback used for user_id=%s reasons=%s",
+                    user.id,
+                    " | ".join(fail_reasons),
+                )
+                degraded = _build_degraded_assistant_reply(prompt)
+                final_text = f"{degraded}\n\n—\nUsed {min(used + 1, limit)}/{limit}"
+                ok = await _safe_edit_text(
+                    thinking,
+                    final_text,
+                    disable_web_page_preview=True,
+                )
+                if not ok:
+                    await update.message.reply_text(
+                        final_text,
+                        disable_web_page_preview=True,
+                        **reply_kwargs,
+                    )
+                success = True
                 return TRIAL_WAITING_QUERY
 
         _append_trial_history(context, role="user", content=prompt)
@@ -884,6 +957,7 @@ async def trial_receive_query(
             await update.message.reply_text(
                 _strip_telegram_markdown(final_text),
                 disable_web_page_preview=True,
+                **reply_kwargs,
             )
 
         success = True
