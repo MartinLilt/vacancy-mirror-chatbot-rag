@@ -1,0 +1,240 @@
+# =============================================================================
+# Development Environment — Backend Services
+# =============================================================================
+# Usage:
+#   docker compose -f docker-compose.dev.yml up
+#   docker compose -f docker-compose.dev.yml down
+#
+# Features:
+#   - Hot reload (code changes apply automatically)
+#   - Local PostgreSQL with pgvector
+#   - All backend services (backend, assistant-infer, support-webhook, api)
+#   - Volumes mounted for live development
+#   - Debug-friendly (LOG_LEVEL=DEBUG)
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # PostgreSQL Development Database
+  # ===========================================================================
+  postgres-dev:
+    image: pgvector/pgvector:pg16
+    container_name: vacancy-mirror-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vacancy_mirror_dev
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev123
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+      - ./infra/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5433:5432"  # Not conflicting with production
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d vacancy_mirror_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ===========================================================================
+  # Backend — Telegram Bot (Main Development)
+  # ===========================================================================
+  backend-dev:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vacancy-mirror-backend-dev
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Source code mounted for hot reload
+      - ./backend/src:/app/src:cached
+      # Google service account (if needed)
+      - ./secrets:/etc/vacancy-mirror/secrets:ro
+    environment:
+      # Database
+      - DB_URL=postgresql://dev:dev123@postgres-dev:5432/vacancy_mirror_dev
+      - DB_PASSWORD=dev123
+
+      # Telegram (use your dev bot token)
+      - TELEGRAM_BOT_TOKEN=${DEV_TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_DROP_PENDING_UPDATES=true
+
+      # OpenAI
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+
+      # Google Sheets
+      - GOOGLE_SHEETS_ID=${GOOGLE_SHEETS_ID}
+      - GOOGLE_SERVICE_ACCOUNT_JSON=/etc/vacancy-mirror/secrets/google_service_account.json
+
+      # Chatwoot
+      - CHATWOOT_BASE_URL=${CHATWOOT_BASE_URL:-https://www.app.vacancy-mirror.com/}
+      - CHATWOOT_ACCOUNT_ID=${CHATWOOT_ACCOUNT_ID:-1}
+      - CHATWOOT_INBOX_ID=${CHATWOOT_INBOX_ID:-2}
+      - CHATWOOT_API_ACCESS_TOKEN=${CHATWOOT_API_ACCESS_TOKEN}
+      - CHATWOOT_WEBHOOK_TOKEN=${CHATWOOT_WEBHOOK_TOKEN}
+
+      # Stripe (test mode)
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+
+      # Assistant Infer URLs
+      - ASSISTANT_INFER_URLS=http://assistant-infer-dev-1:8090,http://assistant-infer-dev-2:8090,http://assistant-infer-dev-3:8090
+
+      # Dev settings
+      - LOG_LEVEL=DEBUG
+      - PYTHONUNBUFFERED=1
+    command: >
+      sh -c "pip install watchfiles &&
+             watchfiles --filter python 'python -m backend.cli telegram-bot' src/"
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+    networks:
+      - dev-network
+
+  # ===========================================================================
+  # Assistant Inference Replicas (×3)
+  # ===========================================================================
+  assistant-infer-dev-1:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vacancy-mirror-assistant-infer-dev-1
+    restart: unless-stopped
+    volumes:
+      - ./backend/src:/app/src:cached
+    environment:
+      - DB_URL=postgresql://dev:dev123@postgres-dev:5432/vacancy_mirror_dev
+      - DB_PASSWORD=dev123
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - LOG_LEVEL=DEBUG
+      - PYTHONUNBUFFERED=1
+    command: >
+      sh -c "pip install watchfiles &&
+             watchfiles --filter python 'python -m backend.cli assistant-infer --port 8090' src/"
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+    networks:
+      - dev-network
+
+  assistant-infer-dev-2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vacancy-mirror-assistant-infer-dev-2
+    restart: unless-stopped
+    volumes:
+      - ./backend/src:/app/src:cached
+    environment:
+      - DB_URL=postgresql://dev:dev123@postgres-dev:5432/vacancy_mirror_dev
+      - DB_PASSWORD=dev123
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - LOG_LEVEL=DEBUG
+      - PYTHONUNBUFFERED=1
+    command: >
+      sh -c "pip install watchfiles &&
+             watchfiles --filter python 'python -m backend.cli assistant-infer --port 8090' src/"
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+    networks:
+      - dev-network
+
+  assistant-infer-dev-3:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vacancy-mirror-assistant-infer-dev-3
+    restart: unless-stopped
+    volumes:
+      - ./backend/src:/app/src:cached
+    environment:
+      - DB_URL=postgresql://dev:dev123@postgres-dev:5432/vacancy_mirror_dev
+      - DB_PASSWORD=dev123
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - LOG_LEVEL=DEBUG
+      - PYTHONUNBUFFERED=1
+    command: >
+      sh -c "pip install watchfiles &&
+             watchfiles --filter python 'python -m backend.cli assistant-infer --port 8090' src/"
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+    networks:
+      - dev-network
+
+  # ===========================================================================
+  # Support Webhook — Stripe
+  # ===========================================================================
+  support-webhook-dev:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vacancy-mirror-support-webhook-dev
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend/src:/app/src:cached
+      - ./secrets:/etc/vacancy-mirror/secrets:ro
+    environment:
+      - DB_URL=postgresql://dev:dev123@postgres-dev:5432/vacancy_mirror_dev
+      - DB_PASSWORD=dev123
+      - TELEGRAM_BOT_TOKEN=${DEV_TELEGRAM_BOT_TOKEN}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - GOOGLE_SHEETS_ID=${GOOGLE_SHEETS_ID}
+      - GOOGLE_SERVICE_ACCOUNT_JSON=/etc/vacancy-mirror/secrets/google_service_account.json
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_TLS=${SMTP_TLS:-true}
+      - SUPPORT_FROM_EMAIL=${SUPPORT_FROM_EMAIL}
+      - LOG_LEVEL=DEBUG
+      - PYTHONUNBUFFERED=1
+    command: >
+      sh -c "pip install watchfiles &&
+             watchfiles --filter python 'python -m backend.cli stripe-webhook --port 8080' src/"
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+    networks:
+      - dev-network
+
+  # ===========================================================================
+  # API — FastAPI (Placeholder)
+  # ===========================================================================
+  api-dev:
+    build:
+      context: ./web/api
+      dockerfile: Dockerfile
+    container_name: vacancy-mirror-api-dev
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    environment:
+      - DB_URL=postgresql://dev:dev123@postgres-dev:5432/vacancy_mirror_dev
+      - DB_PASSWORD=dev123
+      - LOG_LEVEL=DEBUG
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+    networks:
+      - dev-network
+
+networks:
+  dev-network:
+    driver: bridge
+
+volumes:
+  postgres-dev-data:
+
