@@ -562,10 +562,15 @@ class UpworkScraperService:
         self.user_data_dir = user_data_dir
         self.proxy_url = proxy_url
         # Dedicated proxy for FlareSolverr (can differ from browser proxy).
-        # Fallback to scraper proxy for safer default when set.
-        self.flaresolverr_proxy_url = os.environ.get(
-            "FLARESOLVERR_PROXY_URL"
-        ) or proxy_url
+        # Behavior:
+        # - env missing  -> fallback to scraper proxy
+        # - env empty    -> disable FlareSolverr proxy (direct egress)
+        # - env nonempty -> use env value
+        fs_proxy_env = os.environ.get("FLARESOLVERR_PROXY_URL")
+        if fs_proxy_env is None:
+            self.flaresolverr_proxy_url = proxy_url
+        else:
+            self.flaresolverr_proxy_url = fs_proxy_env.strip() or None
         self.cookie_backup_path = (
             cookie_backup_path or Path("data/session_cookies.json")
         )
@@ -780,6 +785,33 @@ class UpworkScraperService:
 
         except Exception as e:
             err = str(e)
+            # If proxy tunnel is flaky, one direct retry is often enough.
+            if (
+                self.flaresolverr_proxy_url
+                and (
+                    "ERR_TUNNEL_CONNECTION_FAILED" in err
+                    or "ERR_PROXY_CONNECTION_FAILED" in err
+                )
+            ):
+                log.warning(
+                    "🔁 FlareSolverr proxy tunnel error; retrying once without proxy"
+                )
+                try:
+                    solution = self.flaresolverr.solve(
+                        url=url,
+                        max_timeout=self.flaresolverr_max_timeout_ms,
+                        proxy=None,
+                    )
+                    self._flaresolverr_timeout_streak = 0
+                    log.info(
+                        "✅ FlareSolverr direct fallback solved! Cookies: %d, HTML: %d bytes",
+                        len(solution.get("cookies", [])),
+                        len(solution.get("html", "")),
+                    )
+                    return solution
+                except Exception as fallback_exc:
+                    err = str(fallback_exc)
+
             if self._is_flaresolverr_timeout_error(err):
                 self._flaresolverr_timeout_streak += 1
                 log.warning(
