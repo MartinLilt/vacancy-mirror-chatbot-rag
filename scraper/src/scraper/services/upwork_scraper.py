@@ -481,6 +481,111 @@ def _sum_experience_buckets(filter_groups: list) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Per-tier job count extraction
+# ---------------------------------------------------------------------------
+
+#: Maps canonical label tokens to Upwork contractor_tier values.
+#: 1 = Entry Level, 2 = Intermediate, 3 = Expert.
+_TIER_TOKEN_MAP: list[tuple[str, int]] = [
+    ("entry", 1),
+    ("intermediate", 2),
+    ("expert", 3),
+]
+
+
+def _extract_tier_counts(nuxt: dict[str, Any]) -> dict[int, int]:
+    """Return per-tier job counts ``{1: entry, 2: intermediate, 3: expert}``.
+
+    Reads the same Experience Level filter buckets as
+    ``_extract_total_from_filters`` but returns individual tier counts
+    instead of the sum.  Tier numbers mirror Upwork's ``contractor_tier``
+    query parameter.
+
+    Returns an empty dict if the buckets cannot be found.
+    """
+    state: dict = nuxt.get("state", {})
+
+    # Primary path: state.jobsFilters.filters
+    jobs_filters: dict = state.get("jobsFilters", {})
+    filters = jobs_filters.get("filters")
+    if filters and isinstance(filters, list):
+        result = _parse_tier_buckets(filters)
+        if result:
+            return result
+
+    # Fallback: scan all state keys for a list that looks like filter groups
+    for state_val in state.values():
+        if not isinstance(state_val, dict):
+            continue
+        for val in state_val.values():
+            if isinstance(val, list):
+                result = _parse_tier_buckets(val)
+                if result:
+                    return result
+
+    return {}
+
+
+def _parse_tier_buckets(filter_groups: list) -> dict[int, int]:
+    """Parse a filter-groups list into ``{tier_num: count}`` mapping.
+
+    Only returns a result when at least two of the three canonical tier
+    tokens (entry / intermediate / expert) are identified in bucket labels
+    — this avoids false matches from unrelated filter groups.
+    """
+
+    def _label(b: dict) -> str:
+        raw = (
+            b.get("label") or b.get("name") or b.get("title")
+            or b.get("id") or b.get("value") or ""
+        )
+        return str(raw).lower()
+
+    for group in filter_groups:
+        if not isinstance(group, dict):
+            continue
+        buckets = (
+            group.get("buckets") or group.get("options")
+            or group.get("items") or group.get("values") or []
+        )
+        if not isinstance(buckets, list) or not buckets:
+            continue
+        labeled = [b for b in buckets if isinstance(b, dict)]
+        if not labeled:
+            continue
+
+        labels = [_label(b) for b in labeled]
+        # Require at least 2 of the 3 canonical tokens
+        token_hits = {
+            tok for tok, _ in _TIER_TOKEN_MAP
+            if any(tok in lb for lb in labels)
+        }
+        if len(token_hits) < 2:
+            continue
+
+        result: dict[int, int] = {}
+        for b in labeled:
+            lbl = _label(b)
+            for tok, tier_num in _TIER_TOKEN_MAP:
+                if tok in lbl:
+                    cnt = b.get("count") or b.get("value") or 0
+                    try:
+                        result[tier_num] = int(cnt)
+                    except (TypeError, ValueError):
+                        pass
+                    break
+
+        if len(result) >= 2:
+            log.info(
+                "🔢 tier_counts=%s",
+                {k: v for k, v in sorted(result.items())},
+            )
+            return result
+
+    return {}
+
+
 def _is_cloudflare_block(html: str, *, _log_trigger: bool = True) -> bool:
     """Return True if the page looks like a Cloudflare challenge or ban."""
     for indicator in _CF_INDICATORS:
@@ -562,10 +667,15 @@ class UpworkScraperService:
         self.user_data_dir = user_data_dir
         self.proxy_url = proxy_url
         # Dedicated proxy for FlareSolverr (can differ from browser proxy).
-        # Fallback to scraper proxy for safer default when set.
-        self.flaresolverr_proxy_url = os.environ.get(
-            "FLARESOLVERR_PROXY_URL"
-        ) or proxy_url
+        # Behavior:
+        # - env missing  -> fallback to scraper proxy
+        # - env empty    -> disable FlareSolverr proxy (direct egress)
+        # - env nonempty -> use env value
+        fs_proxy_env = os.environ.get("FLARESOLVERR_PROXY_URL")
+        if fs_proxy_env is None:
+            self.flaresolverr_proxy_url = proxy_url
+        else:
+            self.flaresolverr_proxy_url = fs_proxy_env.strip() or None
         self.cookie_backup_path = (
             cookie_backup_path or Path("data/session_cookies.json")
         )
@@ -780,6 +890,33 @@ class UpworkScraperService:
 
         except Exception as e:
             err = str(e)
+            # If proxy tunnel is flaky, one direct retry is often enough.
+            if (
+                self.flaresolverr_proxy_url
+                and (
+                    "ERR_TUNNEL_CONNECTION_FAILED" in err
+                    or "ERR_PROXY_CONNECTION_FAILED" in err
+                )
+            ):
+                log.warning(
+                    "🔁 FlareSolverr proxy tunnel error; retrying once without proxy"
+                )
+                try:
+                    solution = self.flaresolverr.solve(
+                        url=url,
+                        max_timeout=self.flaresolverr_max_timeout_ms,
+                        proxy=None,
+                    )
+                    self._flaresolverr_timeout_streak = 0
+                    log.info(
+                        "✅ FlareSolverr direct fallback solved! Cookies: %d, HTML: %d bytes",
+                        len(solution.get("cookies", [])),
+                        len(solution.get("html", "")),
+                    )
+                    return solution
+                except Exception as fallback_exc:
+                    err = str(fallback_exc)
+
             if self._is_flaresolverr_timeout_error(err):
                 self._flaresolverr_timeout_streak += 1
                 log.warning(
@@ -928,6 +1065,7 @@ class UpworkScraperService:
         category_uid: str,
         page: int,
         *,
+        contractor_tier: int | None = None,
         extra_params: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]] | None, dict[str, int]]:
         """Scrape a single page and return (jobs, paging_info).
@@ -935,14 +1073,18 @@ class UpworkScraperService:
         ``paging_info`` is the raw ``paging`` dict from __NUXT__:
         ``{"total": 2543, "count": 50, "offset": 150, ...}``
 
-        Use ``paging["total"]`` to know the real total job count for the
-        category, which lets the caller compute the actual max page number:
-        ``max_page = min(100, math.ceil(paging["total"] / 50))``.
+        When ``contractor_tier`` is given (1 = Entry Level, 2 = Intermediate,
+        3 = Expert), the URL includes ``&contractor_tier=N`` so Upwork only
+        returns jobs for that experience level.  The returned ``paging_info``
+        will contain ``"tier_counts"`` only when scraping without a tier
+        filter (un-filtered pages expose all three buckets at once).
 
         Args:
             category_uid: Upwork category UID.
             page: Page number (1-based).
-            extra_params: Optional extra query parameters.
+            contractor_tier: Optional experience-level filter (1/2/3).
+            extra_params: Optional extra query parameters (merged with
+                contractor_tier if both are provided).
 
         Returns:
             Tuple of (jobs list or None, paging dict).
@@ -951,7 +1093,13 @@ class UpworkScraperService:
             (genuine empty page / beyond category limit).
             paging is empty dict if paging data was unavailable.
         """
-        url = _build_url(category_uid, page, extra_params)
+        # Merge contractor_tier into extra_params
+        ep: dict[str, str] | None = extra_params
+        if contractor_tier is not None:
+            ep = dict(extra_params or {})
+            ep["contractor_tier"] = str(contractor_tier)
+
+        url = _build_url(category_uid, page, ep)
         jobs, paging = await self._load_page_with_retry_and_paging(
             url, page
         )
@@ -1350,6 +1498,19 @@ class UpworkScraperService:
                     log.info(
                         "🔢 [page %d] filter_total=%d (paging.total=%d)",
                         page_num, filter_total, paging.get("total", 0),
+                    )
+
+                # Extract per-tier counts (Entry / Intermediate / Expert).
+                # Present on un-filtered pages; used by chaos scraper to
+                # compute per-tier real_max_page without extra requests.
+                tier_counts = _extract_tier_counts(nuxt)
+                if tier_counts:
+                    paging = dict(paging)
+                    paging["tier_counts"] = tier_counts
+                    log.info(
+                        "🔢 [page %d] tier_counts=%s",
+                        page_num,
+                        {k: v for k, v in sorted(tier_counts.items())},
                     )
 
                 # If the page is empty but totals say it should exist, retry.
