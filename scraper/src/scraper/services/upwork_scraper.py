@@ -212,7 +212,10 @@ def _build_url(
         url += f"&page={page}"
     if extra_params:
         for key, value in extra_params.items():
-            url += f"&{key}={value}"
+            # URL-encode the value so slashes in timezone strings (e.g.
+            # "America/New_York" → "America%2FNew_York") are transmitted
+            # correctly.
+            url += f"&{key}={quote(str(value), safe='')}"
     return url
 
 
@@ -1079,6 +1082,7 @@ class UpworkScraperService:
         page: int,
         *,
         contractor_tier: int | None = None,
+        timezone: str | None = None,
         extra_params: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]] | None, dict[str, int]]:
         """Scrape a single page and return (jobs, paging_info).
@@ -1087,32 +1091,31 @@ class UpworkScraperService:
         ``{"total": 2543, "count": 50, "offset": 150, ...}``
 
         When ``contractor_tier`` is given (1 = Entry Level, 2 = Intermediate,
-        3 = Expert), the URL includes ``&contractor_tier=N`` so Upwork only
-        returns jobs for that experience level.  The returned ``paging_info``
-        will contain ``"tier_counts"`` only when scraping without a tier
-        filter (un-filtered pages expose all three buckets at once).
+        3 = Expert), the URL includes ``&contractor_tier=N``.
+        When ``timezone`` is given (e.g. ``"America/New_York"``), the URL
+        includes ``&timezone=America%2FNew_York``.
+        Both filters can be combined.
 
         Args:
             category_uid: Upwork category UID.
             page: Page number (1-based).
             contractor_tier: Optional experience-level filter (1/2/3).
-            extra_params: Optional extra query parameters (merged with
-                contractor_tier if both are provided).
+            timezone: Optional client-timezone filter (IANA tz string).
+            extra_params: Optional extra query parameters.
 
         Returns:
             Tuple of (jobs list or None, paging dict).
             Returns (None, {}) when all retries failed (load error).
-            Returns ([], paging) when page loaded but had 0 jobs
-            (genuine empty page / beyond category limit).
-            paging is empty dict if paging data was unavailable.
+            Returns ([], paging) when page loaded but had 0 jobs.
         """
-        # Merge contractor_tier into extra_params
-        ep: dict[str, str] | None = extra_params
+        # Merge contractor_tier and timezone into extra_params
+        ep: dict[str, str] = dict(extra_params or {})
         if contractor_tier is not None:
-            ep = dict(extra_params or {})
             ep["contractor_tier"] = str(contractor_tier)
+        if timezone is not None:
+            ep["timezone"] = timezone
 
-        url = _build_url(category_uid, page, ep)
+        url = _build_url(category_uid, page, ep if ep else None)
         jobs, paging = await self._load_page_with_retry_and_paging(
             url, page
         )

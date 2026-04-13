@@ -36,6 +36,7 @@ from scraper.services.upwork_scraper import (
     MAX_ALLOWED_PAGE,
     PER_PAGE,
 )
+from scraper.timezones import UPWORK_TIMEZONES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -763,6 +764,9 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
     _TIER_KEYS = ("1", "2", "3")
 
     def _default_tier() -> dict:
+        return {"total_jobs": 0, "real_max_page": 0, "timezones": {}}
+
+    def _default_tz_state() -> dict:
         return {"total_jobs": 0, "real_max_page": 0, "visited_pages": []}
 
     def _default_cat_state() -> dict:
@@ -835,6 +839,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
         *,
         source: str,
         tier_num: int | None = None,
+        timezone: str | None = None,
     ) -> None:
         """Update state from a page's paging metadata.
 
@@ -842,8 +847,11 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
           - uses ``tier_counts`` to set per-tier real_max_page (preferred)
           - falls back to ``filter_total`` for overall total only
 
-        When ``tier_num`` is set (tier-filtered page):
-          - uses ``paging.total`` to update just that tier's metadata
+        When ``tier_num`` is set and ``timezone`` is None (tier probe):
+          - uses ``paging.total`` to update tier-level metadata
+
+        When ``tier_num`` and ``timezone`` are both set (timezone page):
+          - uses ``paging.total`` to update per-timezone metadata inside the tier
         """
         tier_counts = paging.get("tier_counts")
         filter_total = paging.get("filter_total", 0)
@@ -872,24 +880,42 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                 )
                 cat_state["total_upwork_jobs"] = display_total
         else:
-            # Tier-filtered page: paging.total is the tier's job count
             key = str(tier_num)
             tiers = cat_state.setdefault(
                 "tiers", {k: _default_tier() for k in _TIER_KEYS}
             )
             tier_st = tiers.setdefault(key, _default_tier())
-            if paging_total > 0:
-                rmp = min(MAX_ALLOWED_PAGE, math.ceil(paging_total / PER_PAGE))
-                existing = tier_st.get("real_max_page", 0)
-                if rmp != existing:
-                    tier_st["real_max_page"] = rmp
-                    log.info(
-                        "   📏 [%s] tier=%s real_max_page=%d→%d "
-                        "(paging_total=%d, %s)",
-                        cat_name, key, existing, rmp, paging_total, source,
-                    )
-                if paging_total > tier_st.get("total_jobs", 0):
-                    tier_st["total_jobs"] = paging_total
+
+            if timezone is not None:
+                # Timezone-filtered page: update per-timezone state
+                tz_states = tier_st.setdefault("timezones", {})
+                tz_st = tz_states.setdefault(timezone, _default_tz_state())
+                if paging_total > 0:
+                    rmp = min(MAX_ALLOWED_PAGE, math.ceil(paging_total / PER_PAGE))
+                    if tz_st.get("real_max_page", 0) != rmp:
+                        tz_st["real_max_page"] = rmp
+                        log.info(
+                            "   📏 [%s] tier=%s tz=%s real_max_page→%d "
+                            "(total=%d, %s)",
+                            cat_name, key, timezone.split("/")[-1],
+                            rmp, paging_total, source,
+                        )
+                    if paging_total > tz_st.get("total_jobs", 0):
+                        tz_st["total_jobs"] = paging_total
+            else:
+                # Tier probe (no timezone): update tier-level totals only
+                if paging_total > 0:
+                    rmp = min(MAX_ALLOWED_PAGE, math.ceil(paging_total / PER_PAGE))
+                    existing = tier_st.get("real_max_page", 0)
+                    if rmp != existing:
+                        tier_st["real_max_page"] = rmp
+                        log.info(
+                            "   📏 [%s] tier=%s real_max_page=%d→%d "
+                            "(paging_total=%d, %s)",
+                            cat_name, key, existing, rmp, paging_total, source,
+                        )
+                    if paging_total > tier_st.get("total_jobs", 0):
+                        tier_st["total_jobs"] = paging_total
             # Keep total_upwork_jobs in sync (sum of all tier totals)
             tiers_sum = sum(t.get("total_jobs", 0) for t in tiers.values())
             if tiers_sum > 0:
@@ -1120,208 +1146,206 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                         "tiers", {k: _default_tier() for k in _TIER_KEYS}
                     )
                     tier_state = tiers.setdefault(tier_key, _default_tier())
+                    tz_states = tier_state.setdefault("timezones", {})
 
-                    tier_max = tier_state.get("real_max_page", 0)
-                    if tier_max == 0:
+                    # ── Build (timezone, page) candidate list ──────────
+                    # Priority 3:1  probed-with-unvisited > unprobed
+                    probed_cands: list[tuple[str, int]] = []
+                    unprobed_cands: list[tuple[str, int]] = []
+
+                    for tz in UPWORK_TIMEZONES:
+                        tz_st = tz_states.get(tz, {})
+                        rmp = tz_st.get("real_max_page", 0)
+                        visited_set = set(tz_st.get("visited_pages", []))
+
+                        if rmp == 0 and 1 not in visited_set:
+                            # Never probed → visit page 1 to discover count
+                            unprobed_cands.append((tz, 1))
+                        elif rmp > 0:
+                            for p in range(1, rmp + 1):
+                                if p not in visited_set:
+                                    probed_cands.append((tz, p))
+                        # else: probed and empty (rmp=0, page 1 visited) → skip
+
+                    all_cands = probed_cands + unprobed_cands
+                    if not all_cands:
                         log.info(
-                            "  [%s][%s] real_max_page=0 — not yet probed, skip",
+                            "  [%s][%s] All timezone pools exhausted — skip",
                             cat_name, tier_label,
                         )
                         continue
 
-                    visited_tier = set(tier_state["visited_pages"])
-                    all_possible = [
-                        p for p in range(1, tier_max + 1)
-                        if p not in visited_tier
-                    ]
-                    if not all_possible:
-                        log.info(
-                            "  [%s][%s] All %d pages visited — skip",
-                            cat_name, tier_label, tier_max,
-                        )
-                        continue
-
-                    # Weighted random page selection
-                    weights = []
-                    for p in all_possible:
-                        if p <= 15:
-                            weights.append(3.0)
-                        elif p <= 50:
-                            weights.append(1.0)
-                        else:
-                            weights.append(0.3)
-
-                    n_pages = min(args.max_pages_per_cat, len(all_possible))
-                    chosen_pages_raw = random.choices(
-                        all_possible, weights=weights, k=n_pages * 3
+                    # Weighted random selection (no duplicates)
+                    cand_weights = (
+                        [3.0] * len(probed_cands) + [1.0] * len(unprobed_cands)
                     )
-                    seen_p: set[int] = set()
-                    unique_pages: list[int] = []
-                    for p in chosen_pages_raw:
-                        if p not in seen_p:
-                            seen_p.add(p)
-                            unique_pages.append(p)
-                        if len(unique_pages) >= n_pages:
+                    n_select = min(args.max_pages_per_cat, len(all_cands))
+                    raw = random.choices(
+                        all_cands, weights=cand_weights, k=n_select * 4
+                    )
+                    seen_combo: set[tuple[str, int]] = set()
+                    selected: list[tuple[str, int]] = []
+                    for combo in raw:
+                        if combo not in seen_combo:
+                            seen_combo.add(combo)
+                            selected.append(combo)
+                        if len(selected) >= n_select:
                             break
 
                     log.info(
-                        "🎲 [%s][%s] tier=%s collected=%d/%d  pages: %s",
+                        "🎲 [%s][%s] tier=%s collected=%d/%d  "
+                        "%d slots: %s",
                         cat_name, tier_label, tier_key,
                         cat_state["collected"], args.target_per_cat,
-                        unique_pages,
+                        len(selected),
+                        [(tz.split("/")[-1], pg) for tz, pg in selected],
                     )
 
-                    # Scrape in batches of 2 (back-to-back, then delay)
-                    BATCH_SIZE = 2
-                    page_batches = [
-                        unique_pages[i:i + BATCH_SIZE]
-                        for i in range(0, len(unique_pages), BATCH_SIZE)
-                    ]
+                    # ── Scrape selected (timezone, page) combinations ──
+                    slot_jobs: list[dict] = []
 
-                    for batch_idx, batch in enumerate(page_batches):
+                    for slot_idx, (tz, page_num) in enumerate(selected):
                         if not time_ok():
                             break
                         if cat_state["collected"] >= args.target_per_cat:
                             break
 
-                        batch_jobs: list[dict] = []
+                        tz_short = tz.split("/")[-1]
+                        tz_st = tz_states.setdefault(tz, _default_tz_state())
 
-                        for page_num in batch:
-                            if not time_ok():
-                                break
-
-                            # Skip pages beyond updated real_max
-                            real_max_now = tier_state.get("real_max_page", 0)
-                            if real_max_now and page_num > real_max_now:
-                                log.info(
-                                    "   ⏭ [%s][%s] page %d > real_max=%d — skip",
-                                    cat_name, tier_label, page_num, real_max_now,
-                                )
-                                tier_state["visited_pages"].append(page_num)
-                                continue
-
+                        # Skip if this page is now beyond updated real_max
+                        rmp_now = tz_st.get("real_max_page", 0)
+                        if rmp_now > 0 and page_num > rmp_now:
                             log.info(
-                                "   📄 [%s][%s] page %d (batch %d/%d) ...",
-                                cat_name, tier_label, page_num,
-                                batch_idx + 1, len(page_batches),
+                                "   ⏭ [%s][%s][%s] pg%d > real_max=%d — skip",
+                                cat_name, tier_label, tz_short,
+                                page_num, rmp_now,
                             )
-
-                            try:
-                                page_jobs, paging = (
-                                    await service.scrape_page_with_paging(
-                                        category_uid=cat_uid,
-                                        page=page_num,
-                                        contractor_tier=tier_num,
-                                    )
-                                )
-                            except Exception as exc:
-                                log.warning(
-                                    "   ⚠️  [%s][%s] page %d failed: %s",
-                                    cat_name, tier_label, page_num, exc,
-                                )
-                                tier_state["visited_pages"].append(page_num)
-                                save_state(state)
-                                continue
-
-                            if page_jobs is None:
-                                log.warning(
-                                    "   ⚠️  [%s][%s] page %d load failed — skip",
-                                    cat_name, tier_label, page_num,
-                                )
-                                tier_state["visited_pages"].append(page_num)
-                                save_state(state)
-                                continue
-
-                            # Update tier metadata from paging
-                            apply_paging_totals(
-                                cat_state, cat_name, cat_uid, paging,
-                                source=f"tier{tier_key} page {page_num}",
-                                tier_num=tier_num,
-                            )
-
-                            tier_state["visited_pages"].append(page_num)
-
-                            if not page_jobs:
-                                log.info(
-                                    "   ⚪ [%s][%s] page %d empty "
-                                    "(real_max=%s)",
-                                    cat_name, tier_label, page_num,
-                                    tier_state.get("real_max_page", "?"),
-                                )
-                                save_state(state)
-                                break
-
-                            # Dedup pre-filter
-                            cat_known = known_uids.get(cat_uid, set())
-                            new_in_page = [
-                                j for j in page_jobs
-                                if (j.get("uid") or j.get("ciphertext"))
-                                not in cat_known
-                            ]
-                            log.info(
-                                "   🔍 [%s][%s] page %d: %d jobs, "
-                                "%d new, %d dups",
-                                cat_name, tier_label, page_num,
-                                len(page_jobs), len(new_in_page),
-                                len(page_jobs) - len(new_in_page),
-                            )
-
-                            batch_jobs.extend(page_jobs)
-
-                            # Intra-batch human-like pause
-                            is_last_in_batch = (page_num == batch[-1])
-                            if not is_last_in_batch and time_ok():
-                                intra_delay = random.uniform(3.0, 9.0)
-                                log.info(
-                                    "   ⏸  Intra-batch pause %.1fs ...",
-                                    intra_delay,
-                                )
-                                await __import__("asyncio").sleep(intra_delay)
-
-                        # ── Insert entire batch at once ───────────────
-                        if batch_jobs and db is not None and run_id is not None:
-                            try:
-                                inserted, dups = db.insert_raw_jobs(
-                                    jobs=batch_jobs,
-                                    scrape_run_id=run_id,
-                                    category_uid=cat_uid,
-                                    category_name=cat_name,
-                                    known_uids=known_uids.get(cat_uid),
-                                )
-                            except Exception as exc:
-                                log.error("DB insert_raw_jobs failed: %s", exc)
-                                inserted, dups = 0, 0
-                        else:
-                            inserted, dups = 0, 0
-
-                        cat_state["collected"] += inserted
-                        total_inserted_session += inserted
-                        total_pages_session += len(batch)
-                        if inserted > 0:
-                            session_made_progress = True
+                            if page_num not in tz_st["visited_pages"]:
+                                tz_st["visited_pages"].append(page_num)
+                            continue
 
                         log.info(
-                            "   ✅ [%s][%s] batch %d/%d: +%d new, "
-                            "%d dups (total=%d/%d)",
-                            cat_name, tier_label,
-                            batch_idx + 1, len(page_batches),
-                            inserted, dups,
-                            cat_state["collected"], args.target_per_cat,
+                            "   📄 [%s][%s][%s] page %d (%d/%d) ...",
+                            cat_name, tier_label, tz_short,
+                            page_num, slot_idx + 1, len(selected),
                         )
 
-                        save_state(state)
+                        try:
+                            page_jobs, paging = (
+                                await service.scrape_page_with_paging(
+                                    category_uid=cat_uid,
+                                    page=page_num,
+                                    contractor_tier=tier_num,
+                                    timezone=tz,
+                                )
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "   ⚠️  [%s][%s][%s] page %d failed: %s",
+                                cat_name, tier_label, tz_short, page_num, exc,
+                            )
+                            if page_num not in tz_st["visited_pages"]:
+                                tz_st["visited_pages"].append(page_num)
+                            save_state(state)
+                            continue
 
-                        # Inter-batch delay
-                        is_last_batch = batch_idx == len(page_batches) - 1
-                        if time_ok() and not is_last_batch:
-                            delay = random.randint(
-                                args.delay_min, args.delay_max
+                        if page_jobs is None:
+                            log.warning(
+                                "   ⚠️  [%s][%s][%s] page %d load failed — skip",
+                                cat_name, tier_label, tz_short, page_num,
                             )
+                            if page_num not in tz_st["visited_pages"]:
+                                tz_st["visited_pages"].append(page_num)
+                            save_state(state)
+                            continue
+
+                        # Update timezone paging metadata
+                        apply_paging_totals(
+                            cat_state, cat_name, cat_uid, paging,
+                            source=f"T{tier_key}/{tz_short} pg{page_num}",
+                            tier_num=tier_num,
+                            timezone=tz,
+                        )
+
+                        if page_num not in tz_st["visited_pages"]:
+                            tz_st["visited_pages"].append(page_num)
+
+                        if not page_jobs:
                             log.info(
-                                "   ⏳ Waiting %ds before next batch...",
-                                delay,
+                                "   ⚪ [%s][%s][%s] page %d empty "
+                                "(real_max=%s)",
+                                cat_name, tier_label, tz_short, page_num,
+                                tz_st.get("real_max_page", "?"),
                             )
-                            await __import__("asyncio").sleep(delay)
+                            save_state(state)
+                            continue
+
+                        # Dedup pre-filter
+                        cat_known = known_uids.get(cat_uid, set())
+                        new_in_page = [
+                            j for j in page_jobs
+                            if (j.get("uid") or j.get("ciphertext"))
+                            not in cat_known
+                        ]
+                        log.info(
+                            "   🔍 [%s][%s][%s] page %d: %d jobs, "
+                            "%d new, %d dups",
+                            cat_name, tier_label, tz_short, page_num,
+                            len(page_jobs), len(new_in_page),
+                            len(page_jobs) - len(new_in_page),
+                        )
+
+                        slot_jobs.extend(page_jobs)
+
+                        # Inter-slot pause (not after last slot)
+                        is_last_slot = slot_idx == len(selected) - 1
+                        if not is_last_slot and time_ok():
+                            intra_delay = random.uniform(3.0, 9.0)
+                            log.info(
+                                "   ⏸  Slot pause %.1fs ...", intra_delay,
+                            )
+                            await __import__("asyncio").sleep(intra_delay)
+
+                    # ── Insert all slot jobs at once ───────────────────
+                    if slot_jobs and db is not None and run_id is not None:
+                        try:
+                            inserted, dups = db.insert_raw_jobs(
+                                jobs=slot_jobs,
+                                scrape_run_id=run_id,
+                                category_uid=cat_uid,
+                                category_name=cat_name,
+                                known_uids=known_uids.get(cat_uid),
+                            )
+                        except Exception as exc:
+                            log.error("DB insert_raw_jobs failed: %s", exc)
+                            inserted, dups = 0, 0
+                    else:
+                        inserted, dups = 0, 0
+
+                    cat_state["collected"] += inserted
+                    total_inserted_session += inserted
+                    total_pages_session += len(selected)
+                    if inserted > 0:
+                        session_made_progress = True
+
+                    log.info(
+                        "   ✅ [%s][%s] tier done: +%d new, %d dups "
+                        "(total=%d/%d)",
+                        cat_name, tier_label,
+                        inserted, dups,
+                        cat_state["collected"], args.target_per_cat,
+                    )
+
+                    save_state(state)
+
+                    # Inter-tier delay
+                    if time_ok() and tier_key != _TIER_KEYS[-1]:
+                        delay = random.randint(args.delay_min, args.delay_max)
+                        log.info(
+                            "   ⏳ Waiting %ds before next tier...", delay,
+                        )
+                        await __import__("asyncio").sleep(delay)
 
             if not session_made_progress:
                 log.info(
@@ -1338,8 +1362,9 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                     db.finish_scrape_run(
                         run_id=run_id,
                         pages_collected=sum(
-                            len(t.get("visited_pages", []))
+                            len(tz_s.get("visited_pages", []))
                             for t in cat_state.get("tiers", {}).values()
+                            for tz_s in t.get("timezones", {}).values()
                         ),
                         jobs_collected=cat_state.get("collected", 0),
                         jobs_inserted=cat_state.get("collected", 0),
@@ -1374,8 +1399,8 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
         done = "✅" if s["collected"] >= args.target_per_cat else "⏳"
         tiers_info = "  ".join(
             f"T{k}:{s.get('tiers', {}).get(k, {}).get('total_jobs', 0)}"
-            f"(pg{s.get('tiers', {}).get(k, {}).get('real_max_page', 0)},"
-            f"v{len(s.get('tiers', {}).get(k, {}).get('visited_pages', []))})"
+            f"(tz={len(s.get('tiers', {}).get(k, {}).get('timezones', {}))},"
+            f"v={sum(len(tz.get('visited_pages',[])) for tz in s.get('tiers',{}).get(k,{}).get('timezones',{}).values())})"
             for k in _TIER_KEYS
         )
         log.info(
