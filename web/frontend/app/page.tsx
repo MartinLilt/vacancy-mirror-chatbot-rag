@@ -3,13 +3,19 @@ import Link from "next/link";
 import Image from "next/image";
 
 export const metadata: Metadata = {
-  title: "Vacancy Mirror — AI market intelligence for Upwork freelancers",
+  title: "Vacancy Mirror — AI Market Intelligence for Upwork Freelancers",
   description:
-    "Vacancy Mirror analyses the Upwork job market and gives you " +
-    "weekly trend reports, AI-powered profile advice, and smart " +
-    "portfolio recommendations — all inside Telegram.",
+    "Track Upwork market trends, get AI-powered profile advice, and " +
+    "receive personalised portfolio recommendations — all inside Telegram. " +
+    "Free plan available, no registration required.",
   alternates: { canonical: "https://vacancy-mirror.com" },
-  openGraph: { url: "https://vacancy-mirror.com" },
+  openGraph: {
+    url: "https://vacancy-mirror.com",
+    title: "Vacancy Mirror — AI Market Intelligence for Upwork Freelancers",
+    description:
+      "Weekly Upwork trends, AI profile optimisation, and portfolio " +
+      "recommendations for freelancers — straight to Telegram. Start free.",
+  },
 };
 
 const features = [
@@ -30,15 +36,90 @@ const features = [
   },
 ];
 
+
+
 const stats = [
-  { value: "12", label: "Upwork categories tracked" },
-  { value: "7", label: "AI-powered tools" },
-  { value: "Free", label: "to get started" },
+  { value: "Weekly", label: "fresh market intelligence, straight to Telegram" },
+  { value: "7", label: "AI tools to grow your freelance career" },
+  { value: "$0", label: "to start — no card, no registration" },
 ];
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://vacancy-mirror.com/#website",
+      url: "https://vacancy-mirror.com",
+      name: "Vacancy Mirror",
+      description:
+        "AI market intelligence for Upwork freelancers — weekly trend reports, profile optimisation, and portfolio recommendations.",
+      publisher: { "@id": "https://vacancy-mirror.com/#organization" },
+    },
+    {
+      "@type": "Organization",
+      "@id": "https://vacancy-mirror.com/#organization",
+      name: "Vacancy Mirror",
+      url: "https://vacancy-mirror.com",
+      logo: {
+        "@type": "ImageObject",
+        url: "https://vacancy-mirror.com/brand-circle.png",
+        width: 1024,
+        height: 1024,
+      },
+      contactPoint: {
+        "@type": "ContactPoint",
+        email: "support@vacancy-mirror.com",
+        contactType: "customer support",
+      },
+      sameAs: ["https://t.me/VacancyMirror"],
+    },
+    {
+      "@type": "SoftwareApplication",
+      name: "Vacancy Mirror",
+      url: "https://vacancy-mirror.com",
+      applicationCategory: "BusinessApplication",
+      operatingSystem: "Telegram",
+      offers: [
+        {
+          "@type": "Offer",
+          name: "Free",
+          price: "0",
+          priceCurrency: "USD",
+          description:
+            "35 AI messages per day, Weekly Trends Report, Weekly Trend Charts.",
+        },
+        {
+          "@type": "Offer",
+          name: "Plus",
+          price: "9.99",
+          priceCurrency: "USD",
+          description:
+            "60 AI messages per day, Profile Optimisation Expert, Weekly Profile & Projects Agent.",
+        },
+        {
+          "@type": "Offer",
+          name: "Pro Plus",
+          price: "19.99",
+          priceCurrency: "USD",
+          description:
+            "120 AI messages per day, Extended Projects Agent, Weekly Skills & Tags Report.",
+        },
+      ],
+      description:
+        "Vacancy Mirror tracks the Upwork job market and delivers weekly trend reports, AI-powered profile advice, and personalised portfolio recommendations inside Telegram.",
+      publisher: { "@id": "https://vacancy-mirror.com/#organization" },
+    },
+  ],
+};
 
 export default function HomePage() {
   return (
     <main className="min-h-screen bg-gray-950 text-white">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
       {/* Hero */}
       <section className="relative flex flex-col items-center justify-center px-6 py-32 text-center overflow-hidden">
         <div aria-hidden className="pointer-events-none absolute inset-0 flex items-center justify-center">
@@ -64,7 +145,7 @@ export default function HomePage() {
 
           <div className="flex flex-col sm:flex-row gap-3 items-center">
             <a
-              href="https://t.me/VacancyMirrorBot"
+              href="https://t.me/VacancyMirror"
               target="_blank"
               rel="noopener noreferrer"
               className="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-8 py-3.5 rounded-xl text-base transition-colors shadow-lg shadow-indigo-600/20"
@@ -152,7 +233,7 @@ export default function HomePage() {
               <li className="flex gap-2"><span className="text-indigo-400">✓</span>Weekly Trend Charts</li>
             </ul>
             <a
-              href="https://t.me/VacancyMirrorBot"
+              href="https://t.me/VacancyMirror"
               target="_blank"
               rel="noopener noreferrer"
               className="block text-center bg-white/10 hover:bg-white/20 text-white font-semibold py-3 rounded-xl transition-colors text-sm"
@@ -232,7 +313,7 @@ export default function HomePage() {
               just open the bot in Telegram.
             </p>
             <a
-              href="https://t.me/VacancyMirrorBot"
+              href="https://t.me/VacancyMirror"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-block bg-white text-indigo-700 font-semibold px-8 py-3.5 rounded-xl hover:bg-indigo-50 transition-colors text-base shadow-lg"

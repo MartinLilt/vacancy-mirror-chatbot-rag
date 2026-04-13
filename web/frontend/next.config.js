@@ -19,21 +19,21 @@ const securityHeaders = [
   },
   // Content Security Policy:
   // - default: only same origin
-  // - scripts: self + Vercel live feedback widget
+  // - scripts: self + GA/GTM + Vercel live feedback widget
   // - styles: self + inline (Tailwind needs this)
   // - fonts: Google Fonts
-  // - connect: Stripe (checkout redirect), Telegram
+  // - connect: Stripe (checkout redirect), Telegram, Google Analytics
   // - frame-ancestors: nobody (double-locks iframe embedding)
   {
     key: "Content-Security-Policy",
     value: [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' https://vercel.live",
+      "script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://vercel.live",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com",
-      "img-src 'self' data: blob:",
-      "connect-src 'self' https://buy.stripe.com https://t.me",
-      "frame-src https://buy.stripe.com",
+      "img-src 'self' data: blob: https://www.google-analytics.com",
+      "connect-src 'self' https://buy.stripe.com https://t.me https://www.google-analytics.com https://analytics.google.com https://region1.google-analytics.com",
+      "frame-src https://buy.stripe.com https://www.googletagmanager.com",
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",

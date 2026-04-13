@@ -1,18 +1,18 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Pricing",
+  title: "Pricing — Free, Plus & Pro Plus Plans",
   description:
-    "Free, Plus ($9.99/mo) and Pro Plus ($19.99/mo) plans for " +
-    "Upwork freelancers. Start free, upgrade for AI profile advice " +
-    "and portfolio recommendations.",
+    "Start free, upgrade when ready. Vacancy Mirror offers a free plan " +
+    "with AI market assistant and trend reports, Plus at $9.99/mo for " +
+    "profile optimisation, and Pro Plus at $19.99/mo for full portfolio coverage.",
   alternates: { canonical: "https://vacancy-mirror.com/pricing" },
   openGraph: {
     url: "https://vacancy-mirror.com/pricing",
-    title: "Pricing | Vacancy Mirror",
+    title: "Pricing — Free, Plus & Pro Plus | Vacancy Mirror",
     description:
-      "Free, Plus and Pro Plus plans for Upwork freelancers. " +
-      "Cancel anytime.",
+      "Free plan available. Plus $9.99/mo, Pro Plus $19.99/mo. " +
+      "AI tools for Upwork freelancers. Cancel anytime.",
   },
 };
 
@@ -31,7 +31,7 @@ const plans = [
       { label: "Weekly Trend Charts", href: "/benefits#trend-charts" },
     ],
     cta: "Start in Telegram",
-    href: "https://t.me/VacancyMirrorBot",
+    href: "https://t.me/VacancyMirror",
     highlighted: false,
   },
   {
@@ -69,8 +69,95 @@ const plans = [
 ];
 
 export default function PricingPage() {
+  const breadcrumbLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      {
+        "@type": "ListItem",
+        position: 1,
+        name: "Home",
+        item: "https://vacancy-mirror.com",
+      },
+      {
+        "@type": "ListItem",
+        position: 2,
+        name: "Pricing",
+        item: "https://vacancy-mirror.com/pricing",
+      },
+    ],
+  };
+
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: "Vacancy Mirror",
+    description:
+      "AI market intelligence for Upwork freelancers — weekly trend reports, profile optimisation, and portfolio recommendations inside Telegram.",
+    url: "https://vacancy-mirror.com",
+    image: "https://vacancy-mirror.com/brand-circle.png",
+    brand: {
+      "@type": "Brand",
+      name: "Vacancy Mirror",
+    },
+    offers: [
+      {
+        "@type": "Offer",
+        name: "Free Plan",
+        price: "0",
+        priceCurrency: "USD",
+        availability: "https://schema.org/InStock",
+        url: "https://t.me/VacancyMirror",
+        description:
+          "35 AI messages per day, Weekly Trends Report, Weekly Trend Charts. No card required.",
+      },
+      {
+        "@type": "Offer",
+        name: "Plus Plan",
+        price: "9.99",
+        priceCurrency: "USD",
+        availability: "https://schema.org/InStock",
+        url: "https://vacancy-mirror.com/pricing",
+        priceSpecification: {
+          "@type": "UnitPriceSpecification",
+          price: "9.99",
+          priceCurrency: "USD",
+          billingDuration: "P1M",
+          unitText: "month",
+        },
+        description:
+          "60 AI messages per day, Profile Optimisation Expert, Weekly Profile & Projects Agent, up to 5 portfolio projects.",
+      },
+      {
+        "@type": "Offer",
+        name: "Pro Plus Plan",
+        price: "19.99",
+        priceCurrency: "USD",
+        availability: "https://schema.org/PreOrder",
+        url: "https://vacancy-mirror.com/pricing",
+        priceSpecification: {
+          "@type": "UnitPriceSpecification",
+          price: "19.99",
+          priceCurrency: "USD",
+          billingDuration: "P1M",
+          unitText: "month",
+        },
+        description:
+          "120 AI messages per day, Extended Projects Agent, up to 12 portfolio projects, Weekly Skills & Tags Report.",
+      },
+    ],
+  };
+
   return (
     <main className="min-h-screen bg-gray-950 text-white">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbLd) }}
+      />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
       <div className="max-w-5xl mx-auto px-6 py-20">
         <a
           href="/"

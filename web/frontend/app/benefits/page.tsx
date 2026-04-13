@@ -2,18 +2,18 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 export const metadata: Metadata = {
-  title: "Features",
+  title: "Features — 7 AI Tools for Upwork Freelancers",
   description:
-    "Seven tools for Upwork freelancers: weekly market trends, " +
-    "AI assistant, profile optimisation, portfolio agent, and " +
-    "skills reports — free and paid plans.",
+    "Vacancy Mirror gives you 7 tools to grow on Upwork: weekly market " +
+    "trends, AI career assistant, profile optimisation, portfolio agent, " +
+    "and skills reports — free and paid plans.",
   alternates: { canonical: "https://vacancy-mirror.com/benefits" },
   openGraph: {
     url: "https://vacancy-mirror.com/benefits",
-    title: "Features | Vacancy Mirror",
+    title: "Features — 7 AI Tools for Upwork Freelancers | Vacancy Mirror",
     description:
-      "Seven tools for Upwork freelancers: weekly market trends, " +
-      "AI assistant, profile optimisation, and more.",
+      "Weekly Upwork market trends, AI profile optimisation, portfolio " +
+      "recommendations, and more — free and paid plans.",
   },
 };
 
@@ -143,8 +143,48 @@ const features = [
 ];
 
 export default function BenefitsPage() {
+  const jsonLd = [
+    {
+      "@context": "https://schema.org",
+      "@type": "BreadcrumbList",
+      itemListElement: [
+        {
+          "@type": "ListItem",
+          position: 1,
+          name: "Home",
+          item: "https://vacancy-mirror.com",
+        },
+        {
+          "@type": "ListItem",
+          position: 2,
+          name: "Features",
+          item: "https://vacancy-mirror.com/benefits",
+        },
+      ],
+    },
+    {
+      "@context": "https://schema.org",
+      "@type": "ItemList",
+      name: "Vacancy Mirror Features",
+      description: "7 AI-powered tools for Upwork freelancers",
+      url: "https://vacancy-mirror.com/benefits",
+      numberOfItems: features.length,
+      itemListElement: features.map((f, i) => ({
+        "@type": "ListItem",
+        position: i + 1,
+        name: f.title,
+        description: f.summary,
+        url: `https://vacancy-mirror.com/benefits#${f.id}`,
+      })),
+    },
+  ];
+
   return (
     <main className="min-h-screen bg-gray-950 text-white">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
       <div className="max-w-3xl mx-auto px-6 py-20">
         <Link
           href="/"
@@ -201,13 +241,42 @@ export default function BenefitsPage() {
           ))}
         </div>
 
-        <div className="mt-16 text-center">
+        {/* Community section */}
+        <div className="mt-16 bg-gradient-to-br from-indigo-900/40 to-violet-900/30 border border-indigo-500/30 rounded-2xl p-8 text-center">
+          <div className="text-4xl mb-4">🌐</div>
+          <h2 className="text-2xl font-semibold mb-3">
+            Vacancy Mirror | International Community
+          </h2>
+          <p className="text-gray-400 text-sm max-w-xl mx-auto mb-6">
+            Join our Telegram community of freelancers who share market
+            insights, discuss Upwork trends, swap tips on proposals and
+            profiles, and support each other on the road to Top Rated.
+          </p>
+          <a
+            href="https://t.me/VacancyMirror"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-8 py-3 rounded-xl text-sm transition-colors"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              className="w-5 h-5"
+            >
+              <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" />
+            </svg>
+            Join the Community
+          </a>
+        </div>
+
+        <div className="mt-10 text-center">
           <p className="text-gray-400 mb-6">
             Ready to start? All free features are available immediately.
           </p>
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <a
-              href="https://t.me/VacancyMirrorBot"
+              href="https://t.me/VacancyMirror"
               target="_blank"
               rel="noopener noreferrer"
               className="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-8 py-3 rounded-xl text-sm transition-colors"
