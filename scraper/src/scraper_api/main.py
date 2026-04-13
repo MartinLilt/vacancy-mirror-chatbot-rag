@@ -536,7 +536,7 @@ _UID_TO_NAME: dict[str, str] = {v: k for k, v in CATEGORY_UIDS.items()}
 
 CHAOS_STATE_PATH = Path(os.environ.get(
     "CHAOS_STATE_FILE", "/app/data/chaos_state.json"))
-CHAOS_TARGET_PER_CAT = int(os.environ.get("CHAOS_TARGET_PER_CAT", "2500"))
+CHAOS_TARGET_PER_CAT = int(os.environ.get("CHAOS_TARGET_PER_CAT", "5000"))
 
 
 @app.get("/chaos-state")

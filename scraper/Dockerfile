@@ -43,16 +43,21 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY src/ src/
 COPY scripts/ scripts/
-COPY crontab /etc/cron.d/scraper-cron
+COPY crontab /tmp/crontab-user
+COPY crontab.crond /etc/cron.d/scraper-cron
 COPY entrypoint.sh /app/entrypoint.sh
 COPY supervisord.conf /etc/supervisor/conf.d/scraper.conf
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -e .
 
-# Setup cron
+# Setup cron (dual approach: user crontab for schedule-API + cron.d for execution)
+# The cron.d file needs SHELL, PATH, and a username field so Debian cron
+# can execute it even when capabilities are restricted (cap_drop: ALL +
+# cap_add: SETUID/SETGID/DAC_OVERRIDE/AUDIT_WRITE in docker-compose).
 RUN chmod 0644 /etc/cron.d/scraper-cron && \
-    crontab /etc/cron.d/scraper-cron && \
+    crontab /tmp/crontab-user && \
+    rm /tmp/crontab-user && \
     chmod +x /app/entrypoint.sh && \
     chmod +x /app/scripts/scraper_runner.sh && \
     chmod +x /app/scripts/chaos_runner.sh
