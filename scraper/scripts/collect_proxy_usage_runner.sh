@@ -12,7 +12,7 @@ fi
 
 if [ -z "${WEBSHARE_API_KEY:-}" ]; then
   WEBSHARE_API_KEY="$(tr '\0' '\n' < /proc/1/environ | grep -m1 '^WEBSHARE_API_KEY=' | cut -d= -f2- || true)"
-  export WEBSHARE_API_KEYF
+  export WEBSHARE_API_KEY
 fi
 
 if [ -z "${DATABASE_URL:-}" ]; then

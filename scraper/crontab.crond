@@ -1,0 +1,16 @@
+# Scraper cron schedule — /etc/cron.d system format (requires username field)
+# Fires every hour 8:00–22:00, Mon–Sat.
+# chaos_runner.sh sleeps a random 0–10 min before starting,
+# so actual scraping begins at a random moment inside each hour.
+# Logs: /var/log/scraper.log
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# Format: minute hour dom month dow USERNAME command
+0 8-22 * * 1-6 root /app/scripts/chaos_runner.sh >> /var/log/scraper.log 2>&1
+
+# Webshare real proxy usage snapshot every 15 minutes
+*/15 * * * * root /bin/bash /app/scripts/collect_proxy_usage_runner.sh >> /var/log/scraper.log 2>&1
+
+# Empty line required at end of crontab file
+

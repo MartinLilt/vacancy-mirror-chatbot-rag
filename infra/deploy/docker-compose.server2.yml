@@ -71,6 +71,13 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      # cron (supervisord child) needs these to fork jobs even as root.
+      # Without them, cap_drop:ALL silently prevents crontab execution.
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - AUDIT_WRITE
     environment:
       # Local postgres (on this same server)
       DATABASE_URL: postgresql://app:${DB_PASSWORD}@postgres:5432/vacancy_mirror
@@ -92,6 +99,8 @@ services:
       FLARESOLVERR_ROTATE_AFTER_TIMEOUTS: ${FLARESOLVERR_ROTATE_AFTER_TIMEOUTS:-999}
       # Webshare API for real proxy usage telemetry
       WEBSHARE_API_KEY: ${WEBSHARE_API_KEY:-}
+      # Chaos scraper target jobs per category
+      CHAOS_TARGET_PER_CAT: "5000"
     ports:
       # scraper-api (FastAPI) on port 8000
       - "127.0.0.1:8000:8000"

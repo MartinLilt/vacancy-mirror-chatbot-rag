@@ -27,7 +27,7 @@ DELAY_MAX=90
 MAX_PAGES_PER_CAT=5
 
 # Target jobs per category (overall, cumulative across sessions)
-TARGET_PER_CAT=100
+TARGET_PER_CAT=5000
 
 # Max session runtime (leaves ~10 min buffer before next hour)
 MAX_RUNTIME_MINUTES=50
