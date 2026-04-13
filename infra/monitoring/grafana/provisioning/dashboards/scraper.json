@@ -1,5 +1,5 @@
 {
-  "title": "Vacancy Mirror \u2014 Scraper Dashboard",
+  "title": "Vacancy Mirror — Scraper Dashboard",
   "uid": "scraper-dashboard",
   "tags": [
     "scraper",
@@ -14,7 +14,7 @@
   "panels": [
     {
       "id": 20,
-      "title": "\ud83c\udf9b Scraper Control Panel",
+      "title": "🎛 Scraper Control Panel",
       "type": "text",
       "gridPos": {
         "x": 0,
@@ -59,7 +59,10 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "green" }
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
         }
       }
     },
@@ -94,7 +97,10 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "blue" }
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
         }
       }
     },
@@ -167,9 +173,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": 50 },
-              { "color": "green", "value": 120 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 120
+              }
             ]
           }
         }
@@ -202,12 +217,19 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "green" },
-          "custom": { "fillOpacity": 20 }
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          },
+          "custom": {
+            "fillOpacity": 20
+          }
         }
       },
       "options": {
-        "legend": { "displayMode": "hidden" }
+        "legend": {
+          "displayMode": "hidden"
+        }
       }
     },
     {
@@ -218,7 +240,7 @@
         "x": 12,
         "y": 28,
         "w": 12,
-        "h": 16
+        "h": 20
       },
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -230,14 +252,17 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PCC52D03280B7034C"
           },
-          "rawSql": "WITH categories AS ( SELECT DISTINCT category_uid, category_name FROM scrape_runs ), counts AS ( SELECT category_uid, COUNT(*) AS jobs FROM raw_jobs GROUP BY category_uid ) SELECT CASE categories.category_name WHEN 'Web, Mobile & Software Dev' THEN 'WebDev' WHEN 'Data Science & Analytics' THEN 'Data' WHEN 'Design & Creative' THEN 'Design' WHEN 'IT & Networking' THEN 'IT' WHEN 'Sales & Marketing' THEN 'Sales' WHEN 'Admin Support' THEN 'Admin' WHEN 'Customer Service' THEN 'Support' WHEN 'Accounting & Consulting' THEN 'Acct' WHEN 'Engineering & Architecture' THEN 'Eng' WHEN 'Legal' THEN 'Legal' WHEN 'Writing' THEN 'Writing' WHEN 'Translation' THEN 'Transl' ELSE categories.category_name END AS category, COALESCE(counts.jobs, 0) AS jobs FROM categories LEFT JOIN counts ON counts.category_uid = categories.category_uid ORDER BY jobs DESC",
+          "rawSql": "WITH categories AS ( SELECT DISTINCT category_uid, category_name FROM scrape_runs ), counts AS ( SELECT category_uid, COUNT(*) AS jobs FROM raw_jobs GROUP BY category_uid ) SELECT categories.category_name AS category, COALESCE(counts.jobs, 0) AS jobs FROM categories LEFT JOIN counts ON counts.category_uid = categories.category_uid ORDER BY jobs DESC",
           "format": "table",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
           "custom": {
             "axisPlacement": "auto",
             "axisLabel": "Category",
@@ -262,7 +287,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 44,
+        "y": 48,
         "w": 12,
         "h": 8
       },
@@ -284,12 +309,19 @@
       "fieldConfig": {
         "defaults": {
           "unit": "suffix:MB/h",
-          "color": { "mode": "fixed", "fixedColor": "orange" },
-          "custom": { "fillOpacity": 16 }
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "orange"
+          },
+          "custom": {
+            "fillOpacity": 16
+          }
         }
       },
       "options": {
-        "legend": { "displayMode": "hidden" }
+        "legend": {
+          "displayMode": "hidden"
+        }
       }
     },
     {
@@ -298,7 +330,7 @@
       "type": "text",
       "gridPos": {
         "x": 0,
-        "y": 52,
+        "y": 56,
         "w": 24,
         "h": 14
       },
@@ -313,7 +345,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 66,
+        "y": 70,
         "w": 12,
         "h": 8
       },
@@ -350,7 +382,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 66,
+        "y": 70,
         "w": 12,
         "h": 8
       },
@@ -387,7 +419,7 @@
       "type": "stat",
       "gridPos": {
         "x": 0,
-        "y": 74,
+        "y": 78,
         "w": 8,
         "h": 4
       },
@@ -417,7 +449,7 @@
       "type": "stat",
       "gridPos": {
         "x": 8,
-        "y": 74,
+        "y": 78,
         "w": 8,
         "h": 4
       },
@@ -442,7 +474,10 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "blue" }
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
         }
       }
     },
@@ -452,7 +487,7 @@
       "type": "stat",
       "gridPos": {
         "x": 16,
-        "y": 74,
+        "y": 78,
         "w": 8,
         "h": 4
       },
@@ -481,7 +516,12 @@
       "title": "Last Successful Scrape",
       "description": "Seconds since the last scrape_run with status='done'. Green <2h, orange <6h, red >6h.",
       "type": "stat",
-      "gridPos": { "x": 0, "y": 78, "w": 8, "h": 4 },
+      "gridPos": {
+        "x": 0,
+        "y": 82,
+        "w": 8,
+        "h": 4
+      },
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "PCC52D03280B7034C"
@@ -501,19 +541,34 @@
         "colorMode": "background",
         "graphMode": "none",
         "textMode": "value_and_name",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
           "displayName": "Last OK scrape",
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green",  "value": null  },
-              { "color": "orange", "value": 7200  },
-              { "color": "red",    "value": 21600 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 7200
+              },
+              {
+                "color": "red",
+                "value": 21600
+              }
             ]
           }
         }
@@ -524,7 +579,12 @@
       "title": "Failed Scrape Runs (24h)",
       "description": "Count of scrape_runs with status='failed' in the last 24 hours.",
       "type": "stat",
-      "gridPos": { "x": 8, "y": 78, "w": 8, "h": 4 },
+      "gridPos": {
+        "x": 8,
+        "y": 82,
+        "w": 8,
+        "h": 4
+      },
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "PCC52D03280B7034C"
@@ -544,18 +604,33 @@
         "colorMode": "background",
         "graphMode": "none",
         "textMode": "value_and_name",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
       },
       "fieldConfig": {
         "defaults": {
           "displayName": "Failed runs",
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green",  "value": null },
-              { "color": "yellow", "value": 1    },
-              { "color": "red",    "value": 3    }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
             ]
           }
         }
@@ -566,7 +641,12 @@
       "title": "Proxy Bandwidth Remaining (MB)",
       "description": "Webshare residential proxy MB left in current billing period. Red <2000 MB.",
       "type": "stat",
-      "gridPos": { "x": 16, "y": 78, "w": 8, "h": 4 },
+      "gridPos": {
+        "x": 16,
+        "y": 82,
+        "w": 8,
+        "h": 4
+      },
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "PCC52D03280B7034C"
@@ -586,19 +666,34 @@
         "colorMode": "background",
         "graphMode": "none",
         "textMode": "value_and_name",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "megabytesSI",
           "displayName": "Proxy MB left",
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red",    "value": null  },
-              { "color": "orange", "value": 2000  },
-              { "color": "green",  "value": 10000 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2000
+              },
+              {
+                "color": "green",
+                "value": 10000
+              }
             ]
           }
         }
@@ -609,7 +704,12 @@
       "title": "Scraper Runs: Done vs Failed (7d)",
       "description": "Hourly count of completed and failed scrape_run records over the last 7 days.",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 82, "w": 24, "h": 10 },
+      "gridPos": {
+        "x": 0,
+        "y": 86,
+        "w": 24,
+        "h": 10
+      },
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "PCC52D03280B7034C"
@@ -636,30 +736,60 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "fillOpacity": 15, "lineWidth": 1 }
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 1
+          }
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "done" },
+            "matcher": {
+              "id": "byName",
+              "options": "done"
+            },
             "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } },
-              { "id": "displayName", "value": "Done" }
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              },
+              {
+                "id": "displayName",
+                "value": "Done"
+              }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "failed" },
+            "matcher": {
+              "id": "byName",
+              "options": "failed"
+            },
             "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } },
-              { "id": "displayName", "value": "Failed" }
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "displayName",
+                "value": "Failed"
+              }
             ]
           }
         ]
       },
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
       }
     }
   ],
   "schemaVersion": 36,
-  "version": 8
+  "version": 9
 }
