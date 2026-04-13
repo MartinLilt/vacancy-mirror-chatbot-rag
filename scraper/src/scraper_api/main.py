@@ -376,10 +376,25 @@ def stop_scraper() -> dict:
 
 @app.get("/logs")
 def get_logs(lines: int = Query(100, ge=1, le=200)) -> dict:
-    """Return last N lines from the scraper subprocess log buffer."""
+    """Return last N lines from the scraper log.
+
+    Primary source: in-memory buffer (API-triggered sessions).
+    Fallback: /var/log/scraper.log (cron-triggered sessions).
+    """
     with _scraper_lock:
         current_status = _scraper_state["status"]
     log_lines = list(_log_buffer)[-lines:]
+    # Cron-started sessions don't write to _log_buffer – tail the file instead
+    if not log_lines:
+        try:
+            result = subprocess.run(
+                ["tail", "-n", str(lines), "/var/log/scraper.log"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                log_lines = result.stdout.splitlines()
+        except Exception:
+            pass
     return {
         "status": current_status,
         "lines": log_lines,
@@ -697,9 +712,10 @@ def chaos_state() -> dict:
 # Schedule endpoints
 # ---------------------------------------------------------------------------
 
-CRONTAB_PATH = "/etc/cron.d/scraper"
+CRONTAB_PATH = "/etc/cron.d/scraper-cron"
 CRON_MARKER = "SCRAPER_AUTO"
-CRON_CMD = "/app/scripts/scraper_runner.sh >> /var/log/scraper.log 2>&1"
+CRON_CMD = "/app/scripts/chaos_runner.sh >> /var/log/scraper.log 2>&1"
+CRON_USER = "root"  # cron.d format requires a username field
 
 
 def _read_crontab() -> str:
@@ -727,27 +743,46 @@ def _write_crontab(content: str) -> None:
 
 
 def _parse_cron_line(line: str) -> dict | None:
-    """Parse a cron line into components. Returns None if not a valid job."""
+    """Parse a cron line into components. Returns None if not a valid job.
+
+    Handles both formats:
+      - cron.d (7+ fields):  min hour dom month dow USERNAME command
+      - user crontab (6 fields): min hour dom month dow command
+    """
     line = line.strip()
     if not line or line.startswith("#"):
         return None
-    parts = line.split(None, 5)
-    if len(parts) < 6:
-        return None
-    return {
-        "minute": parts[0],
-        "hour": parts[1],
-        "dom": parts[2],
-        "month": parts[3],
-        "dow": parts[4],
-        "command": parts[5],
-        "enabled": True,
-    }
+    # Try cron.d format first (7 fields including username)
+    parts = line.split(None, 6)
+    if len(parts) >= 7:
+        return {
+            "minute": parts[0],
+            "hour": parts[1],
+            "dom": parts[2],
+            "month": parts[3],
+            "dow": parts[4],
+            # parts[5] is the username field (e.g. "root") – skip it
+            "command": parts[6],
+            "enabled": True,
+        }
+    # Fallback: user crontab format (6 fields)
+    parts6 = line.split(None, 5)
+    if len(parts6) >= 6:
+        return {
+            "minute": parts6[0],
+            "hour": parts6[1],
+            "dom": parts6[2],
+            "month": parts6[3],
+            "dow": parts6[4],
+            "command": parts6[5],
+            "enabled": True,
+        }
+    return None
 
 
 def _build_cron_line(minute: str, hour: str, dom: str,
                      month: str, dow: str) -> str:
-    return f"{minute} {hour} {dom} {month} {dow} {CRON_CMD}"
+    return f"{minute} {hour} {dom} {month} {dow} {CRON_USER} {CRON_CMD}"
 
 
 @app.get("/schedule")
@@ -758,9 +793,13 @@ def get_schedule() -> dict:
     enabled = False
     for line in content.splitlines():
         stripped = line.strip()
-        # disabled line
+        # disabled line: "#! SCRAPER_AUTO 0 8-22 * * 1-6 root /app/scripts/..."
         if stripped.startswith("#!") and CRON_MARKER in stripped:
-            parsed = _parse_cron_line(stripped[2:].strip())
+            raw = stripped[2:].strip()
+            # strip the marker token so _parse_cron_line sees a clean cron line
+            if raw.startswith(CRON_MARKER + " "):
+                raw = raw[len(CRON_MARKER) + 1:]
+            parsed = _parse_cron_line(raw)
             if parsed:
                 parsed["enabled"] = False
                 jobs.append(parsed)
@@ -838,7 +877,11 @@ def enable_schedule() -> dict:
     for line in content.splitlines():
         stripped = line.strip()
         if stripped.startswith("#!") and CRON_CMD in stripped:
-            lines.append(stripped[2:].strip())
+            raw = stripped[2:].strip()
+            # strip the marker token so the restored line is a valid cron entry
+            if raw.startswith(CRON_MARKER + " "):
+                raw = raw[len(CRON_MARKER) + 1:]
+            lines.append(raw)
             changed = True
         else:
             lines.append(line)
