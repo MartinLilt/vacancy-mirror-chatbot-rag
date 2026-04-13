@@ -16,6 +16,42 @@ export PATH=/usr/local/bin:$PATH
 
 set -e
 
+# ── Recover env vars from PID 1 (supervisord) when running under cron ────────
+# Cron executes with a minimal environment and does NOT inherit the container's
+# env vars set by docker-compose.  We read them from /proc/1/environ (the env
+# of supervisord, which *does* have them because docker-compose injects them at
+# container start).  Same technique as collect_proxy_usage_runner.sh.
+_read_proc_env() {
+  tr '\0' '\n' < /proc/1/environ | grep -m1 "^${1}=" | cut -d= -f2- || true
+}
+
+if [ -z "${DATABASE_URL:-}" ]; then
+  DATABASE_URL="$(_read_proc_env DATABASE_URL)"
+  export DATABASE_URL
+fi
+if [ -z "${PROXY_URL:-}" ]; then
+  PROXY_URL="$(_read_proc_env PROXY_URL)"
+  export PROXY_URL
+fi
+if [ -z "${FLARESOLVERR_URL:-}" ]; then
+  FLARESOLVERR_URL="$(_read_proc_env FLARESOLVERR_URL)"
+  export FLARESOLVERR_URL
+fi
+if [ -z "${CHROME_PATH:-}" ]; then
+  # Try env first, then fall back to the Debian chromium package location.
+  CHROME_PATH="$(_read_proc_env CHROME_PATH)"
+  if [ -z "$CHROME_PATH" ]; then
+    CHROME_PATH="/usr/bin/chromium"
+  fi
+  export CHROME_PATH
+fi
+
+# Fail fast if DATABASE_URL is still missing — no point running without DB.
+if [ -z "${DATABASE_URL:-}" ]; then
+  echo "ERROR chaos_runner: DATABASE_URL is not set (checked env + /proc/1/environ)"
+  exit 1
+fi
+
 # ── Config ────────────────────────────────────────────────────────────
 START_HOUR=8
 END_HOUR=22
