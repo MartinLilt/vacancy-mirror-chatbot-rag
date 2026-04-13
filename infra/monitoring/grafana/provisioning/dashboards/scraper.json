@@ -475,8 +475,191 @@
         "colorMode": "none",
         "graphMode": "none"
       }
+    },
+    {
+      "id": 21,
+      "title": "Last Successful Scrape",
+      "description": "Seconds since the last scrape_run with status='done'. Green <2h, orange <6h, red >6h.",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 78, "w": 8, "h": 4 },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PCC52D03280B7034C"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PCC52D03280B7034C"
+          },
+          "rawSql": "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(finished_at)))::bigint AS seconds_ago FROM scrape_runs WHERE status = 'done'",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "displayName": "Last OK scrape",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null  },
+              { "color": "orange", "value": 7200  },
+              { "color": "red",    "value": 21600 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 22,
+      "title": "Failed Scrape Runs (24h)",
+      "description": "Count of scrape_runs with status='failed' in the last 24 hours.",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 78, "w": 8, "h": 4 },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PCC52D03280B7034C"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PCC52D03280B7034C"
+          },
+          "rawSql": "SELECT COUNT(*) AS failed FROM scrape_runs WHERE status = 'failed' AND started_at > NOW() - INTERVAL '24 hours'",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "Failed runs",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1    },
+              { "color": "red",    "value": 3    }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 23,
+      "title": "Proxy Bandwidth Remaining (MB)",
+      "description": "Webshare residential proxy MB left in current billing period. Red <2000 MB.",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 78, "w": 8, "h": 4 },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PCC52D03280B7034C"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PCC52D03280B7034C"
+          },
+          "rawSql": "SELECT ROUND(bytes_remaining / 1048576.0, 0)::bigint AS mb_remaining FROM proxy_usage_snapshots WHERE bytes_remaining IS NOT NULL ORDER BY captured_at DESC LIMIT 1",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "megabytesSI",
+          "displayName": "Proxy MB left",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null  },
+              { "color": "orange", "value": 2000  },
+              { "color": "green",  "value": 10000 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 24,
+      "title": "Scraper Runs: Done vs Failed (7d)",
+      "description": "Hourly count of completed and failed scrape_run records over the last 7 days.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 82, "w": 24, "h": 10 },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PCC52D03280B7034C"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PCC52D03280B7034C"
+          },
+          "rawSql": "SELECT date_trunc('hour', started_at) AS time, COUNT(*) AS done FROM scrape_runs WHERE status = 'done' AND started_at > NOW() - INTERVAL '7 days' GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PCC52D03280B7034C"
+          },
+          "rawSql": "SELECT date_trunc('hour', started_at) AS time, COUNT(*) AS failed FROM scrape_runs WHERE status = 'failed' AND started_at > NOW() - INTERVAL '7 days' GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 15, "lineWidth": 1 }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "done" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } },
+              { "id": "displayName", "value": "Done" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "failed" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } },
+              { "id": "displayName", "value": "Failed" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
     }
   ],
   "schemaVersion": 36,
-  "version": 7
+  "version": 8
 }
