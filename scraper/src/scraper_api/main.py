@@ -572,29 +572,69 @@ def chaos_state() -> dict:
         raise HTTPException(
             status_code=500, detail=f"Cannot read state file: {exc}")
 
+    _TIER_LABELS = {1: "Entry", 2: "Intermediate", 3: "Expert"}
+
     categories = []
     total_collected = 0
     for uid, data in raw.items():
         collected = data.get("collected", 0)
-        visited_list = data.get("visited_pages", [])
-        visited_pages = len(visited_list)
-        real_max_page = data.get("real_max_page", 0)
-        # Keep explicit totals from chaos state as-is.
-        # If not yet refreshed in this session, value stays 0 by design.
         total_upwork_jobs = data.get("total_upwork_jobs", 0)
-        max_collectable = min(real_max_page, 100) * 50 if real_max_page else 0
+
+        # ── Support both old format (top-level visited_pages / real_max_page)
+        # and new per-tier format (tiers.{"1","2","3"}.visited_pages etc.) ──
+        tiers_raw: dict = data.get("tiers", {})
+        if tiers_raw:
+            # New format: aggregate across all 3 tiers
+            visited_pages = sum(
+                len(t.get("visited_pages", []))
+                for t in tiers_raw.values()
+            )
+            visited_pages_list: list[int] = sorted(
+                p
+                for t in tiers_raw.values()
+                for p in t.get("visited_pages", [])
+            )
+            real_max_page = sum(
+                t.get("real_max_page", 0) for t in tiers_raw.values()
+            )
+            max_collectable = sum(
+                min(t.get("real_max_page", 0), 100) * 50
+                for t in tiers_raw.values()
+            )
+            # Per-tier breakdown for dashboard
+            tiers_info = []
+            for tier_key in ("1", "2", "3"):
+                tier_num = int(tier_key)
+                t = tiers_raw.get(tier_key, {})
+                tiers_info.append({
+                    "tier": tier_num,
+                    "label": _TIER_LABELS[tier_num],
+                    "total_jobs": t.get("total_jobs", 0),
+                    "real_max_page": t.get("real_max_page", 0),
+                    "visited_pages": len(t.get("visited_pages", [])),
+                })
+        else:
+            # Old format (backward compat)
+            visited_list = data.get("visited_pages", [])
+            visited_pages = len(visited_list)
+            visited_pages_list = sorted(visited_list)
+            real_max_page = data.get("real_max_page", 0)
+            max_collectable = min(real_max_page, 100) * 50 if real_max_page else 0
+            tiers_info = []
+
         pct = round(min(collected / CHAOS_TARGET_PER_CAT * 100, 100), 1)
         total_collected += collected
         categories.append({
             "uid": uid,
             "name": _UID_TO_NAME.get(uid, uid),
             "collected": collected,
-            "visited_pages": visited_pages,
-            "visited_pages_list": sorted(visited_list),
-            "real_max_page": real_max_page,
+            "visited_pages": visited_pages,          # total across all tiers
+            "visited_pages_list": visited_pages_list,
+            "real_max_page": real_max_page,          # total across all tiers
             "total_upwork_jobs": total_upwork_jobs,
             "max_collectable": max_collectable,
             "pct": pct,
+            "tiers": tiers_info,                     # per-tier breakdown
         })
 
     # Sort by name for consistent display

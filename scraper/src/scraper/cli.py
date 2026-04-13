@@ -28,7 +28,6 @@ import os
 import sys
 
 from scraper.categories import CATEGORY_UIDS, CATEGORY_TOTAL_JOBS
-from scraper.paging_bounds import bounded_real_max_from_paging
 from scraper.services.postgres import ScraperPostgresService
 from scraper.services.webshare import WebshareClient
 from scraper.services.upwork_scraper import (
@@ -726,14 +725,20 @@ async def _cmd_inspect_category(args: argparse.Namespace) -> None:
 
 
 async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
-    """Chaotic multi-category scraper.
+    """Chaotic multi-category scraper with per-tier page pools.
 
     Strategy:
-    - Loads/saves state from JSON file (per-category pages visited + jobs count)
+    - Loads/saves state from JSON file (per-category, per-tier progress)
     - Each session: shuffles categories by priority (least collected first),
-      picks random pages (not sequential), scrapes until time limit
-    - Respects per-category target (stops visiting a category once target reached)
-    - Respects real page limit from Upwork (never exceeds available pages)
+      picks random pages from each tier's unvisited pool, scrapes until time
+      limit
+    - Three separate page pools per category:
+        contractor_tier=1 → Entry Level     (≤ 100 pages)
+        contractor_tier=2 → Intermediate    (≤ 100 pages)
+        contractor_tier=3 → Expert          (≤ 100 pages)
+    - Per-tier page limits are derived from Experience Level filter buckets
+      read from a single un-filtered prepass page (no extra requests)
+    - Respects per-category target (stops visiting a category once reached)
     - Inserts all collected jobs to PostgreSQL immediately
     """
     import json
@@ -753,7 +758,20 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
     # All 12 categories: name → uid
     all_cats = list(CATEGORY_UIDS.items())  # [(name, uid), ...]
 
-    # ── State: { uid: { "collected": int, "visited_pages": [int, ...] } } ──
+    _TIER_LABELS = {1: "Entry", 2: "Intermediate", 3: "Expert"}
+    _TIER_KEYS = ("1", "2", "3")
+
+    def _default_tier() -> dict:
+        return {"total_jobs": 0, "real_max_page": 0, "visited_pages": []}
+
+    def _default_cat_state() -> dict:
+        return {
+            "collected": 0,
+            "total_upwork_jobs": 0,
+            "tiers": {k: _default_tier() for k in _TIER_KEYS},
+        }
+
+    # ── State ─────────────────────────────────────────────────────────
     def load_state() -> dict:
         if state_path.exists() and not args.reset:
             try:
@@ -761,22 +779,14 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                     return json.load(f)
             except Exception:
                 pass
-        # Fresh state
-        return {
-            uid: {
-                "collected": 0,
-                "visited_pages": [],
-                "total_upwork_jobs": 0,
-            }
-            for _, uid in all_cats
-        }
+        return {uid: _default_cat_state() for _, uid in all_cats}
 
     def save_state(state: dict) -> None:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = state_path.with_suffix(".tmp")
         with open(tmp, "w") as f:
             json.dump(state, f, indent=2)
-        tmp.replace(state_path)  # atomic rename — safe against kill mid-write
+        tmp.replace(state_path)  # atomic rename
 
     def elapsed_seconds() -> float:
         return (datetime.now() - start_time).total_seconds()
@@ -788,99 +798,118 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
             return False
         return True
 
+    def _apply_tier_counts(
+        cat_state: dict,
+        cat_name: str,
+        tier_counts: dict,
+    ) -> None:
+        """Populate per-tier real_max_page from Experience Level bucket counts.
+
+        ``tier_counts`` is ``{1: 329, 2: 4611, 3: 2364}`` extracted from the
+        un-filtered page's filter sidebar.  Each tier's real_max_page is
+        ``min(100, ceil(count / 50))``.
+        """
+        tiers = cat_state.setdefault(
+            "tiers", {k: _default_tier() for k in _TIER_KEYS}
+        )
+        for tier_num_int, count in tier_counts.items():
+            key = str(tier_num_int)
+            if key not in tiers:
+                tiers[key] = _default_tier()
+            tiers[key]["total_jobs"] = count
+            rmp = min(MAX_ALLOWED_PAGE, math.ceil(count / PER_PAGE)) if count > 0 else 0
+            tiers[key]["real_max_page"] = rmp
+            log.info(
+                "   📏 [%s] tier=%s (%s) total_jobs=%d real_max_page=%d",
+                cat_name, key, _TIER_LABELS.get(tier_num_int, "?"),
+                count, rmp,
+            )
+        cat_state["total_upwork_jobs"] = sum(tier_counts.values())
+
     def apply_paging_totals(
         cat_state: dict,
         cat_name: str,
         cat_uid: str,
-        paging: dict[str, int],
+        paging: dict,
         *,
         source: str,
+        tier_num: int | None = None,
     ) -> None:
-        """Update real_max_page + total_upwork_jobs from paging payload.
+        """Update state from a page's paging metadata.
 
-        Priority:
-        1) filter_total (sum of Experience level buckets) — authoritative.
-        2) paging.total — only allowed to raise the known limit.
+        When ``tier_num`` is None (un-filtered page):
+          - uses ``tier_counts`` to set per-tier real_max_page (preferred)
+          - falls back to ``filter_total`` for overall total only
+
+        When ``tier_num`` is set (tier-filtered page):
+          - uses ``paging.total`` to update just that tier's metadata
         """
+        tier_counts = paging.get("tier_counts")
         filter_total = paging.get("filter_total", 0)
         paging_total = paging.get("total", 0)
-        existing_real_max = cat_state.get("real_max_page", 0)
 
-        if filter_total > 0:
-            real_max = min(100, math.ceil(filter_total / PER_PAGE))
-            cat_state["total_upwork_jobs"] = filter_total
-            if existing_real_max != real_max:
-                cat_state["real_max_page"] = real_max
+        if tier_num is None:
+            # Un-filtered page: best case is tier_counts gives us all 3 at once
+            if tier_counts:
+                _apply_tier_counts(cat_state, cat_name, tier_counts)
                 log.info(
-                    "   📏 [%s] real_max_page=%d (filter_total=%d, %s)",
-                    cat_name,
-                    real_max,
-                    filter_total,
-                    source,
+                    "   📏 [%s] total_upwork_jobs=%d (%s)",
+                    cat_name, cat_state["total_upwork_jobs"], source,
                 )
-        elif paging_total > 0:
-            known_total = CATEGORY_TOTAL_JOBS.get(cat_uid, 0)
-            real_max, decision = bounded_real_max_from_paging(
-                paging_total=paging_total,
-                existing_real_max=existing_real_max,
-                per_page=PER_PAGE,
-                max_allowed_page=100,
-            )
-            # Keep dashboard totals realistic even when page-1 paging.total is low:
-            # use baseline as floor for total_upwork_jobs, while real_max_page
-            # stays bounded by live paging to avoid empty page churn.
-            display_total = max(
-                paging_total,
-                known_total,
-                int(cat_state.get("total_upwork_jobs", 0) or 0),
-            )
-            cat_state["total_upwork_jobs"] = display_total
-            if decision != "kept":
-                cat_state["real_max_page"] = real_max
+            elif filter_total > 0:
+                cat_state["total_upwork_jobs"] = filter_total
                 log.info(
-                    "   📏 [%s] real_max_page=%d (paging_total=%d, baseline=%d, total_upwork_jobs=%d, %s, %s)",
-                    cat_name,
-                    real_max,
+                    "   📏 [%s] total_upwork_jobs=%d (filter_total, %s)",
+                    cat_name, filter_total, source,
+                )
+            elif paging_total > 0:
+                known_total = CATEGORY_TOTAL_JOBS.get(cat_uid, 0)
+                display_total = max(
                     paging_total,
                     known_total,
-                    display_total,
-                    decision,
-                    source,
+                    int(cat_state.get("total_upwork_jobs", 0) or 0),
                 )
+                cat_state["total_upwork_jobs"] = display_total
+        else:
+            # Tier-filtered page: paging.total is the tier's job count
+            key = str(tier_num)
+            tiers = cat_state.setdefault(
+                "tiers", {k: _default_tier() for k in _TIER_KEYS}
+            )
+            tier_st = tiers.setdefault(key, _default_tier())
+            if paging_total > 0:
+                rmp = min(MAX_ALLOWED_PAGE, math.ceil(paging_total / PER_PAGE))
+                existing = tier_st.get("real_max_page", 0)
+                if rmp != existing:
+                    tier_st["real_max_page"] = rmp
+                    log.info(
+                        "   📏 [%s] tier=%s real_max_page=%d→%d "
+                        "(paging_total=%d, %s)",
+                        cat_name, key, existing, rmp, paging_total, source,
+                    )
+                if paging_total > tier_st.get("total_jobs", 0):
+                    tier_st["total_jobs"] = paging_total
 
     # ── Load state ────────────────────────────────────────────────────
     state = load_state()
     if args.reset:
         log.info("🔄 State reset requested — starting fresh")
 
-    # ── Normalize state keys + reset session defaults ──────────────────
-    # Requirement for manual chaos start:
-    # - total_upwork_jobs = 0
-    # - real_max_page = 0
-    # - visited_pages = []
-    # - collected = 0
-    # for all 12 categories before prepass/weighted collection begins.
+    # ── Normalize / reset state for new session ───────────────────────
     for _, uid in all_cats:
-        cat_st = state.setdefault(uid, {"collected": 0, "visited_pages": []})
+        cat_st = state.setdefault(uid, _default_cat_state())
         cat_st["collected"] = 0
-        cat_st["visited_pages"] = []
-        cat_st["real_max_page"] = 0
         cat_st["total_upwork_jobs"] = 0
+        # Reset per-tier visited pages and paging but keep 0 totals
+        cat_st["tiers"] = {k: _default_tier() for k in _TIER_KEYS}
 
-    # Persist zeroed totals so UI/API shows a clean baseline immediately.
     save_state(state)
     log.info(
-        "📊 Chaos state loaded: %d categories tracked",
-        len(state),
+        "📊 Chaos state loaded: %d categories tracked", len(state)
     )
     for name, uid in all_cats:
-        s = state.get(uid, {"collected": 0, "visited_pages": []})
-        log.info(
-            "   %-38s collected=%d  visited_pages=%s",
-            name,
-            s["collected"],
-            s["visited_pages"][:10],
-        )
+        s = state.get(uid, _default_cat_state())
+        log.info("   %-38s collected=%d", name, s["collected"])
 
     # ── DB setup ──────────────────────────────────────────────────────
     db: ScraperPostgresService | None = None
@@ -895,8 +924,6 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
         log.warning("DATABASE_URL not set — results will NOT be saved to DB")
 
     # ── Pre-load known UIDs per category into memory ──────────────────
-    # This lets us detect duplicates instantly (before INSERT)
-    # instead of learning about them only from ON CONFLICT rowcount.
     known_uids: dict[str, set[str]] = {}
     if db is not None:
         log.info("📥 Loading known job UIDs from DB (dedup cache)...")
@@ -909,8 +936,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                 )
             except Exception as exc:
                 log.warning(
-                    "Could not load known UIDs for %s: %s",
-                    cat_uid, exc,
+                    "Could not load known UIDs for %s: %s", cat_uid, exc,
                 )
                 known_uids[cat_uid] = set()
     else:
@@ -927,8 +953,9 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
     await service.start_browser()
 
     # ── One-time totals prepass (all 12 categories, random order) ─────
-    # Before weighted job collection, refresh total_upwork_jobs/real_max_page
-    # by probing page 1 and reading Experience-level derived totals.
+    # Hit un-filtered page 1 per category to get Experience Level bucket
+    # counts → tier_counts = {1: entry, 2: intermediate, 3: expert}.
+    # One request per category gives us real_max_page for all 3 tiers.
     prepass_order = all_cats[:]
     random.shuffle(prepass_order)
     log.info("🧭 Totals prepass started (all categories, random order)")
@@ -937,21 +964,20 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
             log.warning("⏱️  Totals prepass stopped by time limit")
             break
 
-        cat_state = state.setdefault(
-            cat_uid, {"collected": 0, "visited_pages": [], "total_upwork_jobs": 0}
+        cat_state = state.setdefault(cat_uid, _default_cat_state())
+        log.info(
+            "   🧮 [%s] prepass %d/%d ...", cat_name, idx, len(prepass_order)
         )
-        log.info("   🧮 [%s] prepass %d/%d ...", cat_name, idx, len(prepass_order))
         try:
             _, pre_paging = await service.scrape_page_with_paging(
                 category_uid=cat_uid,
                 page=1,
+                # No contractor_tier → un-filtered → tier_counts available
             )
             apply_paging_totals(
-                cat_state,
-                cat_name,
-                cat_uid,
-                pre_paging,
+                cat_state, cat_name, cat_uid, pre_paging,
                 source="session prepass",
+                tier_num=None,
             )
         except Exception as exc:
             log.warning("   ⚠️  [%s] prepass failed: %s", cat_name, exc)
@@ -965,7 +991,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
     try:
         # ── Main chaos loop ───────────────────────────────────────────
         while time_ok():
-            # Filter categories that haven't reached target
+            # Active categories: haven't reached target yet
             active_cats = [
                 (name, uid)
                 for name, uid in all_cats
@@ -979,10 +1005,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                 )
                 break
 
-            # Weighted random order: categories with fewer collected jobs
-            # get proportionally more chances to be picked first.
-            # Weight = sqrt(target - collected) so deficit drives priority
-            # but doesn't completely starve already-progressed categories.
+            # Weighted order: categories with more deficit get priority
             import math as _math
             cat_weights = []
             for cat_name_w, cat_uid_w in active_cats:
@@ -990,7 +1013,6 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                 deficit = max(1, args.target_per_cat - collected)
                 cat_weights.append(_math.sqrt(deficit))
 
-            # Build visit order by sampling without replacement using weights
             remaining = list(range(len(active_cats)))
             visit_order = []
             remaining_weights = list(cat_weights)
@@ -1009,68 +1031,36 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                 if not time_ok():
                     break
 
-                cat_state = state.setdefault(
-                    cat_uid, {"collected": 0, "visited_pages": []}
-                )
+                cat_state = state.setdefault(cat_uid, _default_cat_state())
 
                 if cat_state["collected"] >= args.target_per_cat:
                     continue
 
-                # ── Pick a random page we haven't visited yet ─────────
-                visited = set(cat_state["visited_pages"])
-                # Use real max page discovered from paging data, or 100 cap.
-                # real_max_page is stored in state after first fetch.
-                # NOTE: real_max_page=0 means "unknown yet", not "zero pages".
-                max_possible = min(
-                    100,
-                    cat_state.get("real_max_page") or 100,
-                )
-                all_possible = [
-                    p for p in range(1, max_possible + 1)
-                    if p not in visited
-                ]
-                if not all_possible:
+                # ── Pre-step: refresh tier totals (un-filtered page 1) ──
+                # Refreshes Experience Level bucket counts → tier_counts.
+                # One request per category visit gives all 3 tiers at once.
+                if time_ok() and cat_state["collected"] < args.target_per_cat:
                     log.info(
-                        "  [%s] All %d pages visited — skipping",
-                        cat_name, max_possible,
+                        "   🧮 [%s] pre-step: refresh tier totals...",
+                        cat_name,
                     )
-                    continue
+                    try:
+                        _, pre_paging = await service.scrape_page_with_paging(
+                            category_uid=cat_uid,
+                            page=1,
+                        )
+                        apply_paging_totals(
+                            cat_state, cat_name, cat_uid, pre_paging,
+                            source="pre-step",
+                            tier_num=None,
+                        )
+                        save_state(state)
+                    except Exception as exc:
+                        log.warning(
+                            "   ⚠️  [%s] pre-step failed: %s", cat_name, exc
+                        )
 
-                # Weighted choice: pages 1–15 get 3× weight (most jobs there)
-                # Pages 16–50 get 1× weight, pages 51+ get 0.3× weight
-                weights = []
-                for p in all_possible:
-                    if p <= 15:
-                        weights.append(3.0)
-                    elif p <= 50:
-                        weights.append(1.0)
-                    else:
-                        weights.append(0.3)
-
-                # Pick N random pages for this category this iteration
-                n_pages = min(args.max_pages_per_cat, len(all_possible))
-                chosen_pages = random.choices(
-                    all_possible, weights=weights, k=n_pages * 3
-                )
-                # Deduplicate while preserving order
-                seen: set[int] = set()
-                unique_pages: list[int] = []
-                for p in chosen_pages:
-                    if p not in seen:
-                        seen.add(p)
-                        unique_pages.append(p)
-                    if len(unique_pages) >= n_pages:
-                        break
-
-                log.info(
-                    "🎲 [%s] collected=%d/%d  pages to visit: %s",
-                    cat_name,
-                    cat_state["collected"],
-                    args.target_per_cat,
-                    unique_pages,
-                )
-
-                # Ensure DB run record
+                # ── Ensure DB run record ──────────────────────────────
                 run_id: int | None = session_run_ids.get(cat_uid)
                 if run_id is None and db is not None:
                     try:
@@ -1083,209 +1073,221 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                         log.error("DB start_scrape_run failed: %s", exc)
                         run_id = None
 
-                # ── Scrape chosen pages in batches of 2 ──────────────
-                # Within a batch: no delay between pages (back-to-back).
-                # Between batches: normal random delay.
-                # This doubles throughput: 100 jobs per "step" instead of 50.
-                BATCH_SIZE = 2
-                page_batches = [
-                    unique_pages[i:i + BATCH_SIZE]
-                    for i in range(0, len(unique_pages), BATCH_SIZE)
-                ]
-                total_steps = len(page_batches) + 1  # include pre-step 0
-
-                # ── Pre-step: refresh true category total (batch 0/N) ──────
-                # Before collecting jobs, hit page 1 once to refresh
-                # Experience-level derived totals (filter_total). This keeps
-                # chaos-state Upwork totals accurate for UI and planning.
-                if time_ok() and cat_state["collected"] < args.target_per_cat:
-                    log.info(
-                        "   🧮 [%s] batch 0/%d: refresh category total...",
-                        cat_name,
-                        total_steps,
-                    )
-                    try:
-                        _, pre_paging = await service.scrape_page_with_paging(
-                            category_uid=cat_uid,
-                            page=1,
-                        )
-                        apply_paging_totals(
-                            cat_state,
-                            cat_name,
-                            cat_uid,
-                            pre_paging,
-                            source="pre-step",
-                        )
-                        save_state(state)
-                    except Exception as exc:
-                        log.warning(
-                            "   ⚠️  [%s] batch 0/%d failed: %s",
-                            cat_name,
-                            total_steps,
-                            exc,
-                        )
-
-                for batch_idx, batch in enumerate(page_batches):
+                # ── Iterate over the 3 experience-level tiers ─────────
+                for tier_key in _TIER_KEYS:
                     if not time_ok():
                         break
-
                     if cat_state["collected"] >= args.target_per_cat:
                         break
 
-                    batch_jobs: list[dict] = []
+                    tier_num = int(tier_key)
+                    tier_label = _TIER_LABELS[tier_num]
+                    tiers = cat_state.setdefault(
+                        "tiers", {k: _default_tier() for k in _TIER_KEYS}
+                    )
+                    tier_state = tiers.setdefault(tier_key, _default_tier())
 
-                    for page_num in batch:
-                        if not time_ok():
-                            break
-
-                        # Skip pages beyond real_max_page
-                        real_max_now = cat_state.get("real_max_page", 0)
-                        if real_max_now and page_num > real_max_now:
-                            log.info(
-                                "   ⏭ [%s] page %d > real_max=%d — skip",
-                                cat_name, page_num, real_max_now,
-                            )
-                            cat_state["visited_pages"].append(page_num)
-                            continue
-
+                    tier_max = tier_state.get("real_max_page", 0)
+                    if tier_max == 0:
                         log.info(
-                            "   📄 [%s] page %d (batch %d/%d) ...",
-                            cat_name, page_num,
-                            batch_idx + 1, total_steps,
+                            "  [%s][%s] real_max_page=0 — not yet probed, skip",
+                            cat_name, tier_label,
                         )
+                        continue
 
-                        try:
-                            page_jobs, paging = (
-                                await service.scrape_page_with_paging(
-                                    category_uid=cat_uid,
-                                    page=page_num,
-                                )
-                            )
-                        except Exception as exc:
-                            log.warning(
-                                "   ⚠️  [%s] page %d failed: %s",
-                                cat_name, page_num, exc,
-                            )
-                            cat_state["visited_pages"].append(page_num)
-                            save_state(state)
-                            continue
-
-                        # None = load error, not empty page
-                        if page_jobs is None:
-                            log.warning(
-                                "   ⚠️  [%s] page %d load failed — skip",
-                                cat_name, page_num,
-                            )
-                            cat_state["visited_pages"].append(page_num)
-                            save_state(state)
-                            continue
-
-                        apply_paging_totals(
-                            cat_state,
-                            cat_name,
-                            cat_uid,
-                            paging,
-                            source=f"page {page_num}",
-                        )
-
-                        cat_state["visited_pages"].append(page_num)
-
-                        # Empty page = beyond category limit
-                        if not page_jobs:
-                            cur_real_max = cat_state.get(
-                                "real_max_page", 0
-                            )
-                            log.info(
-                                "   ⚪ [%s] page %d empty (real_max=%s) — "
-                                "not marking future pages as exhausted",
-                                cat_name, page_num,
-                                cur_real_max or "unknown",
-                            )
-                            save_state(state)
-                            break
-
-                        # Pre-check duplicates using in-memory set
-                        cat_known = known_uids.get(cat_uid, set())
-                        new_in_page = [
-                            j for j in page_jobs
-                            if (j.get("uid") or j.get("ciphertext"))
-                            not in cat_known
-                        ]
+                    visited_tier = set(tier_state["visited_pages"])
+                    all_possible = [
+                        p for p in range(1, tier_max + 1)
+                        if p not in visited_tier
+                    ]
+                    if not all_possible:
                         log.info(
-                            "   🔍 [%s] page %d: %d jobs, "
-                            "%d new (pre-filter), %d known dups",
-                            cat_name, page_num,
-                            len(page_jobs),
-                            len(new_in_page),
-                            len(page_jobs) - len(new_in_page),
+                            "  [%s][%s] All %d pages visited — skip",
+                            cat_name, tier_label, tier_max,
                         )
+                        continue
 
-                        batch_jobs.extend(page_jobs)
+                    # Weighted random page selection
+                    weights = []
+                    for p in all_possible:
+                        if p <= 15:
+                            weights.append(3.0)
+                        elif p <= 50:
+                            weights.append(1.0)
+                        else:
+                            weights.append(0.3)
 
-                        # ── Intra-batch human-like pause ──────────────
-                        # Between pages inside a batch: short random delay
-                        # (3–9 s) that mimics a user glancing at results
-                        # before clicking "Next page". Much shorter than
-                        # the inter-batch delay but not zero — avoids
-                        # back-to-back requests that look bot-like.
-                        is_last_in_batch = (
-                            page_num == batch[-1]
-                        )
-                        if not is_last_in_batch and time_ok():
-                            intra_delay = random.uniform(3.0, 9.0)
-                            log.info(
-                                "   ⏸  Intra-batch pause %.1fs ...",
-                                intra_delay,
-                            )
-                            await __import__("asyncio").sleep(
-                                intra_delay
-                            )
-
-                    # ── Insert entire batch at once ───────────────────
-                    if batch_jobs and db is not None and run_id is not None:
-                        try:
-                            inserted, dups = db.insert_raw_jobs(
-                                jobs=batch_jobs,
-                                scrape_run_id=run_id,
-                                category_uid=cat_uid,
-                                category_name=cat_name,
-                                known_uids=known_uids.get(cat_uid),
-                            )
-                        except Exception as exc:
-                            log.error(
-                                "DB insert_raw_jobs failed: %s", exc
-                            )
-                            inserted, dups = 0, 0
-                    else:
-                        inserted, dups = 0, 0
-
-                    cat_state["collected"] += inserted
-                    total_inserted_session += inserted
-                    total_pages_session += len(batch)
-                    if inserted > 0:
-                        session_made_progress = True
+                    n_pages = min(args.max_pages_per_cat, len(all_possible))
+                    chosen_pages_raw = random.choices(
+                        all_possible, weights=weights, k=n_pages * 3
+                    )
+                    seen_p: set[int] = set()
+                    unique_pages: list[int] = []
+                    for p in chosen_pages_raw:
+                        if p not in seen_p:
+                            seen_p.add(p)
+                            unique_pages.append(p)
+                        if len(unique_pages) >= n_pages:
+                            break
 
                     log.info(
-                        "   ✅ [%s] batch %d/%d: +%d new jobs, "
-                        "%d dups (total=%d/%d)",
-                        cat_name, batch_idx + 1, total_steps,
-                        inserted, dups,
+                        "🎲 [%s][%s] tier=%s collected=%d/%d  pages: %s",
+                        cat_name, tier_label, tier_key,
                         cat_state["collected"], args.target_per_cat,
+                        unique_pages,
                     )
 
-                    save_state(state)
+                    # Scrape in batches of 2 (back-to-back, then delay)
+                    BATCH_SIZE = 2
+                    page_batches = [
+                        unique_pages[i:i + BATCH_SIZE]
+                        for i in range(0, len(unique_pages), BATCH_SIZE)
+                    ]
 
-                    # Delay between batches (not within a batch)
-                    is_last_batch = batch_idx == len(page_batches) - 1
-                    if time_ok() and not is_last_batch:
-                        delay = random.randint(
-                            args.delay_min, args.delay_max
-                        )
+                    for batch_idx, batch in enumerate(page_batches):
+                        if not time_ok():
+                            break
+                        if cat_state["collected"] >= args.target_per_cat:
+                            break
+
+                        batch_jobs: list[dict] = []
+
+                        for page_num in batch:
+                            if not time_ok():
+                                break
+
+                            # Skip pages beyond updated real_max
+                            real_max_now = tier_state.get("real_max_page", 0)
+                            if real_max_now and page_num > real_max_now:
+                                log.info(
+                                    "   ⏭ [%s][%s] page %d > real_max=%d — skip",
+                                    cat_name, tier_label, page_num, real_max_now,
+                                )
+                                tier_state["visited_pages"].append(page_num)
+                                continue
+
+                            log.info(
+                                "   📄 [%s][%s] page %d (batch %d/%d) ...",
+                                cat_name, tier_label, page_num,
+                                batch_idx + 1, len(page_batches),
+                            )
+
+                            try:
+                                page_jobs, paging = (
+                                    await service.scrape_page_with_paging(
+                                        category_uid=cat_uid,
+                                        page=page_num,
+                                        contractor_tier=tier_num,
+                                    )
+                                )
+                            except Exception as exc:
+                                log.warning(
+                                    "   ⚠️  [%s][%s] page %d failed: %s",
+                                    cat_name, tier_label, page_num, exc,
+                                )
+                                tier_state["visited_pages"].append(page_num)
+                                save_state(state)
+                                continue
+
+                            if page_jobs is None:
+                                log.warning(
+                                    "   ⚠️  [%s][%s] page %d load failed — skip",
+                                    cat_name, tier_label, page_num,
+                                )
+                                tier_state["visited_pages"].append(page_num)
+                                save_state(state)
+                                continue
+
+                            # Update tier metadata from paging
+                            apply_paging_totals(
+                                cat_state, cat_name, cat_uid, paging,
+                                source=f"tier{tier_key} page {page_num}",
+                                tier_num=tier_num,
+                            )
+
+                            tier_state["visited_pages"].append(page_num)
+
+                            if not page_jobs:
+                                log.info(
+                                    "   ⚪ [%s][%s] page %d empty "
+                                    "(real_max=%s)",
+                                    cat_name, tier_label, page_num,
+                                    tier_state.get("real_max_page", "?"),
+                                )
+                                save_state(state)
+                                break
+
+                            # Dedup pre-filter
+                            cat_known = known_uids.get(cat_uid, set())
+                            new_in_page = [
+                                j for j in page_jobs
+                                if (j.get("uid") or j.get("ciphertext"))
+                                not in cat_known
+                            ]
+                            log.info(
+                                "   🔍 [%s][%s] page %d: %d jobs, "
+                                "%d new, %d dups",
+                                cat_name, tier_label, page_num,
+                                len(page_jobs), len(new_in_page),
+                                len(page_jobs) - len(new_in_page),
+                            )
+
+                            batch_jobs.extend(page_jobs)
+
+                            # Intra-batch human-like pause
+                            is_last_in_batch = (page_num == batch[-1])
+                            if not is_last_in_batch and time_ok():
+                                intra_delay = random.uniform(3.0, 9.0)
+                                log.info(
+                                    "   ⏸  Intra-batch pause %.1fs ...",
+                                    intra_delay,
+                                )
+                                await __import__("asyncio").sleep(intra_delay)
+
+                        # ── Insert entire batch at once ───────────────
+                        if batch_jobs and db is not None and run_id is not None:
+                            try:
+                                inserted, dups = db.insert_raw_jobs(
+                                    jobs=batch_jobs,
+                                    scrape_run_id=run_id,
+                                    category_uid=cat_uid,
+                                    category_name=cat_name,
+                                    known_uids=known_uids.get(cat_uid),
+                                )
+                            except Exception as exc:
+                                log.error("DB insert_raw_jobs failed: %s", exc)
+                                inserted, dups = 0, 0
+                        else:
+                            inserted, dups = 0, 0
+
+                        cat_state["collected"] += inserted
+                        total_inserted_session += inserted
+                        total_pages_session += len(batch)
+                        if inserted > 0:
+                            session_made_progress = True
+
                         log.info(
-                            "   ⏳ Waiting %ds before next batch...",
-                            delay,
+                            "   ✅ [%s][%s] batch %d/%d: +%d new, "
+                            "%d dups (total=%d/%d)",
+                            cat_name, tier_label,
+                            batch_idx + 1, len(page_batches),
+                            inserted, dups,
+                            cat_state["collected"], args.target_per_cat,
                         )
-                        await __import__("asyncio").sleep(delay)
+
+                        save_state(state)
+
+                        # Inter-batch delay
+                        is_last_batch = batch_idx == len(page_batches) - 1
+                        if time_ok() and not is_last_batch:
+                            delay = random.randint(
+                                args.delay_min, args.delay_max
+                            )
+                            log.info(
+                                "   ⏳ Waiting %ds before next batch...",
+                                delay,
+                            )
+                            await __import__("asyncio").sleep(delay)
 
             if not session_made_progress:
                 log.info(
@@ -1301,8 +1303,10 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                 try:
                     db.finish_scrape_run(
                         run_id=run_id,
-                        pages_collected=len(
-                            cat_state.get("visited_pages", [])),
+                        pages_collected=sum(
+                            len(t.get("visited_pages", []))
+                            for t in cat_state.get("tiers", {}).values()
+                        ),
                         jobs_collected=cat_state.get("collected", 0),
                         jobs_inserted=cat_state.get("collected", 0),
                         jobs_skipped=0,
@@ -1328,30 +1332,27 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
         "🏁 Chaos session complete — %ds elapsed",
         int(elapsed_seconds()),
     )
-    log.info(
-        "   Pages scraped  : %d", total_pages_session
-    )
-    log.info(
-        "   Jobs inserted  : %d", total_inserted_session
-    )
+    log.info("   Pages scraped  : %d", total_pages_session)
+    log.info("   Jobs inserted  : %d", total_inserted_session)
     log.info("   Category progress:")
     for name, uid in all_cats:
         s = state.get(uid, {"collected": 0})
         done = "✅" if s["collected"] >= args.target_per_cat else "⏳"
+        tiers_info = "  ".join(
+            f"T{k}:{s.get('tiers', {}).get(k, {}).get('total_jobs', 0)}"
+            f"(pg{s.get('tiers', {}).get(k, {}).get('real_max_page', 0)},"
+            f"v{len(s.get('tiers', {}).get(k, {}).get('visited_pages', []))})"
+            for k in _TIER_KEYS
+        )
         log.info(
-            "   %s %-38s %d/%d",
-            done, name, s["collected"], args.target_per_cat,
+            "   %s %-38s %d/%d  [%s]",
+            done, name, s["collected"], args.target_per_cat, tiers_info,
         )
     log.info("═" * 60)
 
-    # Reset table for next session start/stop/finish UX in Grafana.
+    # Reset state to zero baseline for next session
     for _, uid in all_cats:
-        state[uid] = {
-            "collected": 0,
-            "visited_pages": [],
-            "real_max_page": 0,
-            "total_upwork_jobs": 0,
-        }
+        state[uid] = _default_cat_state()
     save_state(state)
     log.info("🧹 Chaos state reset to zero baseline for next session.")
 
