@@ -23,6 +23,8 @@ on:
 env:
   REGISTRY: ghcr.io
   GHCR_USER: martinlilt
+  # Opt into Node.js 24 for all JavaScript actions (required from June 2026)
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # ============================================================================
@@ -95,7 +97,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Backend image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ./backend
           push: true
@@ -141,7 +143,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push API image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ./web/api
           push: true
@@ -187,7 +189,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Scraper image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ./scraper
           platforms: linux/amd64
@@ -363,4 +365,3 @@ jobs:
             exit 1
           fi
           echo "✅ All deployments successful!"
-

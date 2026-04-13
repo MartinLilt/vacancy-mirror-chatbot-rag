@@ -736,8 +736,9 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
         contractor_tier=1 → Entry Level     (≤ 100 pages)
         contractor_tier=2 → Intermediate    (≤ 100 pages)
         contractor_tier=3 → Expert          (≤ 100 pages)
-    - Per-tier page limits are derived from Experience Level filter buckets
-      read from a single un-filtered prepass page (no extra requests)
+    - Per-tier page limits are derived from paging.total on tier-filtered
+      page 1 probes (contractor_tier=1/2/3) — reliable since paging.total
+      is always present in the NUXT payload, unlike the filter sidebar
     - Respects per-category target (stops visiting a category once reached)
     - Inserts all collected jobs to PostgreSQL immediately
     """
@@ -889,6 +890,10 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                     )
                 if paging_total > tier_st.get("total_jobs", 0):
                     tier_st["total_jobs"] = paging_total
+            # Keep total_upwork_jobs in sync (sum of all tier totals)
+            tiers_sum = sum(t.get("total_jobs", 0) for t in tiers.values())
+            if tiers_sum > 0:
+                cat_state["total_upwork_jobs"] = tiers_sum
 
     # ── Load state ────────────────────────────────────────────────────
     state = load_state()
@@ -952,13 +957,15 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
     )
     await service.start_browser()
 
-    # ── One-time totals prepass (all 12 categories, random order) ─────
-    # Hit un-filtered page 1 per category to get Experience Level bucket
-    # counts → tier_counts = {1: entry, 2: intermediate, 3: expert}.
-    # One request per category gives us real_max_page for all 3 tiers.
+    # ── One-time totals prepass (all 12 categories × 3 tiers) ────────
+    # Probe page 1 for each (category, contractor_tier) pair to get
+    # paging.total → real_max_page per tier.  Using tier-filtered requests
+    # is reliable because paging.total always reflects the tier count,
+    # unlike the filter sidebar (state.jobsFilters.filters) which is NOT
+    # present in the FlareSolverr NUXT payload.
     prepass_order = all_cats[:]
     random.shuffle(prepass_order)
-    log.info("🧭 Totals prepass started (all categories, random order)")
+    log.info("🧭 Totals prepass started (all categories × 3 tiers)")
     for idx, (cat_name, cat_uid) in enumerate(prepass_order, start=1):
         if not time_ok():
             log.warning("⏱️  Totals prepass stopped by time limit")
@@ -966,23 +973,32 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
 
         cat_state = state.setdefault(cat_uid, _default_cat_state())
         log.info(
-            "   🧮 [%s] prepass %d/%d ...", cat_name, idx, len(prepass_order)
+            "   🧮 [%s] prepass %d/%d (probing 3 tiers)...",
+            cat_name, idx, len(prepass_order),
         )
-        try:
-            _, pre_paging = await service.scrape_page_with_paging(
-                category_uid=cat_uid,
-                page=1,
-                # No contractor_tier → un-filtered → tier_counts available
-            )
-            apply_paging_totals(
-                cat_state, cat_name, cat_uid, pre_paging,
-                source="session prepass",
-                tier_num=None,
-            )
-        except Exception as exc:
-            log.warning("   ⚠️  [%s] prepass failed: %s", cat_name, exc)
-        finally:
-            save_state(state)
+        for tier_key in _TIER_KEYS:
+            if not time_ok():
+                break
+            tier_num_p = int(tier_key)
+            tier_label_p = _TIER_LABELS[tier_num_p]
+            try:
+                _, pre_paging = await service.scrape_page_with_paging(
+                    category_uid=cat_uid,
+                    page=1,
+                    contractor_tier=tier_num_p,
+                )
+                apply_paging_totals(
+                    cat_state, cat_name, cat_uid, pre_paging,
+                    source=f"prepass {tier_label_p}",
+                    tier_num=tier_num_p,
+                )
+            except Exception as exc:
+                log.warning(
+                    "   ⚠️  [%s][%s] prepass failed: %s",
+                    cat_name, tier_label_p, exc,
+                )
+            finally:
+                save_state(state)
 
     total_inserted_session = 0
     total_pages_session = 0
@@ -1036,29 +1052,47 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                 if cat_state["collected"] >= args.target_per_cat:
                     continue
 
-                # ── Pre-step: refresh tier totals (un-filtered page 1) ──
-                # Refreshes Experience Level bucket counts → tier_counts.
-                # One request per category visit gives all 3 tiers at once.
+                # ── Pre-step: probe any tier still missing real_max_page ──
+                # Probe tier-filtered page 1 for each tier that hasn't been
+                # probed yet this session.  Uses paging.total (always present)
+                # to derive real_max_page — no filter sidebar needed.
                 if time_ok() and cat_state["collected"] < args.target_per_cat:
-                    log.info(
-                        "   🧮 [%s] pre-step: refresh tier totals...",
-                        cat_name,
+                    tiers_pre = cat_state.setdefault(
+                        "tiers", {k: _default_tier() for k in _TIER_KEYS}
                     )
-                    try:
-                        _, pre_paging = await service.scrape_page_with_paging(
-                            category_uid=cat_uid,
-                            page=1,
+                    unprobed = [
+                        k for k in _TIER_KEYS
+                        if tiers_pre.setdefault(k, _default_tier()).get(
+                            "real_max_page", 0
+                        ) == 0
+                    ]
+                    if unprobed:
+                        log.info(
+                            "   🧮 [%s] pre-step: probing tiers %s...",
+                            cat_name, unprobed,
                         )
-                        apply_paging_totals(
-                            cat_state, cat_name, cat_uid, pre_paging,
-                            source="pre-step",
-                            tier_num=None,
-                        )
-                        save_state(state)
-                    except Exception as exc:
-                        log.warning(
-                            "   ⚠️  [%s] pre-step failed: %s", cat_name, exc
-                        )
+                        for tier_key_p in unprobed:
+                            if not time_ok():
+                                break
+                            tier_num_p = int(tier_key_p)
+                            tier_label_p = _TIER_LABELS[tier_num_p]
+                            try:
+                                _, pre_paging = await service.scrape_page_with_paging(
+                                    category_uid=cat_uid,
+                                    page=1,
+                                    contractor_tier=tier_num_p,
+                                )
+                                apply_paging_totals(
+                                    cat_state, cat_name, cat_uid, pre_paging,
+                                    source=f"pre-step {tier_label_p}",
+                                    tier_num=tier_num_p,
+                                )
+                                save_state(state)
+                            except Exception as exc:
+                                log.warning(
+                                    "   ⚠️  [%s][%s] pre-step failed: %s",
+                                    cat_name, tier_label_p, exc,
+                                )
 
                 # ── Ensure DB run record ──────────────────────────────
                 run_id: int | None = session_run_ids.get(cat_uid)
