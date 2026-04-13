@@ -861,7 +861,10 @@ class UpworkScraperService:
         browser_args: list[str] = []
         if self.proxy_url:
             browser_args.append(f"--proxy-server={self.proxy_url}")
-            log.info("Using proxy: %s", self.proxy_url)
+            # Redact credentials from log
+            _p = urlsplit(self.proxy_url)
+            safe_proxy = f"{_p.scheme}://***@{_p.hostname}:{_p.port}" if _p.username else self.proxy_url
+            log.info("Using proxy: %s", safe_proxy)
 
         self.browser = await uc.start(
             browser_executable_path=self.chrome_path,

@@ -25,6 +25,7 @@ import asyncio
 import logging
 import math
 import os
+import signal
 import sys
 
 from scraper.categories import CATEGORY_UIDS, CATEGORY_TOTAL_JOBS
@@ -39,10 +40,22 @@ from scraper.services.upwork_scraper import (
 from scraper.timezones import UPWORK_TIMEZONES
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s  %(levelname)-8s  %(message)s",
 )
 log = logging.getLogger(__name__)
+
+# Global shutdown flag — set by SIGTERM/SIGINT handler
+_shutdown_requested = False
+
+
+def _handle_shutdown_signal(signum: int, frame: object) -> None:
+    """Signal handler for graceful shutdown."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    sig_name = signal.Signals(signum).name
+    log.warning("⚠️  Received %s — requesting graceful shutdown...", sig_name)
+
 
 _LEVEL_ICONS: dict[int, str] = {1: "🟢", 2: "🟡", 3: "🟠", 4: "🔴"}
 
@@ -373,7 +386,13 @@ def _print_load_report(result: dict) -> None:
 async def _cmd_scrape_categories() -> None:
     """Run the category discovery scrape."""
     service = CategoryScraperService()
-    results = await service.scrape_categories()
+    try:
+        results = await service.scrape_categories()
+    finally:
+        try:
+            await service.stop_browser()
+        except Exception as exc:
+            log.error("Error stopping browser: %s", exc)
     log.info(
         "Scraped %d categories.",
         len(results),
@@ -397,29 +416,30 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
     """
     import random
     from datetime import datetime
+    from pathlib import Path
     from scraper.state import ScraperState
 
     db_url: str | None = (
         args.db_url
         if hasattr(args, "db_url") and args.db_url
-        else __import__("os").environ.get("DATABASE_URL")
+        else os.environ.get("DATABASE_URL")
     )
 
     # Resolve proxy URL from CLI arg or env var
     proxy_url: str | None = (
         args.proxy_url
         if hasattr(args, "proxy_url") and args.proxy_url
-        else __import__("os").environ.get("PROXY_URL")
+        else os.environ.get("PROXY_URL")
     )
 
     # Resolve user_data_dir, cookie_backup from CLI
     user_data_dir = (
-        __import__("pathlib").Path(args.user_data_dir)
+        Path(args.user_data_dir)
         if hasattr(args, "user_data_dir") and args.user_data_dir
         else None
     )
     cookie_backup = (
-        __import__("pathlib").Path(args.cookie_backup)
+        Path(args.cookie_backup)
         if hasattr(args, "cookie_backup") and args.cookie_backup
         else None
     )
@@ -492,6 +512,11 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
     try:
         # Scrape page by page with delays and time checks
         for page in range(start_page, args.max_pages + 1):
+            # Check for shutdown signal
+            if _shutdown_requested:
+                log.info("Shutdown requested, stopping at page %d", page - 1)
+                break
+
             # Check runtime limit (if set)
             if max_runtime_seconds is not None:
                 elapsed_seconds = (
@@ -556,7 +581,7 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
             if page < args.max_pages:
                 delay = random.randint(args.delay_min, args.delay_max)
                 log.info(f"Waiting {delay} seconds...")
-                await __import__("asyncio").sleep(delay)
+                await asyncio.sleep(delay)
 
         status = "done"
 
@@ -564,18 +589,25 @@ async def _cmd_scrape(args: argparse.Namespace) -> None:
         log.error("Scraping error: %s", exc)
 
     finally:
-        await service.stop_browser()
+        try:
+            await service.stop_browser()
+        except Exception as exc:
+            log.error("Error stopping browser: %s", exc)
 
-    if db is not None and run_id is not None:
-        db.finish_scrape_run(
-            run_id=run_id,
-            pages_collected=pages_scraped,
-            jobs_collected=len(jobs),
-            jobs_inserted=total_inserted,
-            jobs_skipped=total_skipped,
-            status=status,
-        )
-        db.close()
+        if db is not None and run_id is not None:
+            try:
+                db.finish_scrape_run(
+                    run_id=run_id,
+                    pages_collected=pages_scraped,
+                    jobs_collected=len(jobs),
+                    jobs_inserted=total_inserted,
+                    jobs_skipped=total_skipped,
+                    status=status,
+                )
+            except Exception as exc:
+                log.error("Error finishing scrape run: %s", exc)
+            finally:
+                db.close()
 
     log.info(
         "Scrape complete: %d jobs collected from %d pages.",
@@ -709,15 +741,19 @@ async def _cmd_inspect_category(args: argparse.Namespace) -> None:
     )
 
     service = CategoryScraperService()
-    await service.start_browser()
-    await service.manual_cloudflare_pass()
+    try:
+        await service.start_browser()
+        await service.manual_cloudflare_pass()
 
-    result = await service.inspect_single_category(
-        category_name=name,
-        expected_uid=expected_uid,
-    )
-
-    await service.stop_browser()
+        result = await service.inspect_single_category(
+            category_name=name,
+            expected_uid=expected_uid,
+        )
+    finally:
+        try:
+            await service.stop_browser()
+        except Exception as exc:
+            log.error("Error stopping browser: %s", exc)
 
     _print_load_report(result)
 
@@ -797,6 +833,8 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
         return (datetime.now() - start_time).total_seconds()
 
     def time_ok() -> bool:
+        if _shutdown_requested:
+            return False
         if elapsed_seconds() >= max_runtime_sec:
             return False
         if datetime.now().hour >= args.stop_at_hour:
@@ -927,12 +965,16 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
         log.info("🔄 State reset requested — starting fresh")
 
     # ── Normalize / reset state for new session ───────────────────────
+    # Only reset session-scoped data (visited_pages within timezones),
+    # NOT cumulative counters (collected, total_upwork_jobs, tier totals).
+    # Those must persist across sessions for the target to work correctly.
     for _, uid in all_cats:
         cat_st = state.setdefault(uid, _default_cat_state())
-        cat_st["collected"] = 0
-        cat_st["total_upwork_jobs"] = 0
-        # Reset per-tier visited pages and paging but keep 0 totals
-        cat_st["tiers"] = {k: _default_tier() for k in _TIER_KEYS}
+        # Reset per-timezone visited_pages for a fresh session crawl
+        for tier_key in _TIER_KEYS:
+            tier_st = cat_st.get("tiers", {}).get(tier_key, {})
+            for tz_st in tier_st.get("timezones", {}).values():
+                tz_st["visited_pages"] = []
 
     save_state(state)
     log.info(
@@ -986,7 +1028,13 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
         user_data_dir=user_data_dir,
         proxy_url=proxy_url,
     )
-    await service.start_browser()
+
+    try:
+        await service.start_browser()
+    except Exception:
+        if db is not None:
+            db.close()
+        raise
 
     # ── One-time totals prepass (all 12 categories × 3 tiers) ────────
     # Probe page 1 for each (category, contractor_tier) pair to get
@@ -1034,6 +1082,9 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
     total_inserted_session = 0
     total_pages_session = 0
     session_run_ids: dict[str, int] = {}
+    # Per-category session stats for accurate scrape_runs records.
+    # Keys: cat_uid → {"seen": int, "inserted": int, "dups": int}
+    session_stats: dict[str, dict[str, int]] = {}
 
     try:
         # ── Main chaos loop ───────────────────────────────────────────
@@ -1053,12 +1104,11 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                 break
 
             # Weighted order: categories with more deficit get priority
-            import math as _math
             cat_weights = []
             for cat_name_w, cat_uid_w in active_cats:
                 collected = state.get(cat_uid_w, {}).get("collected", 0)
                 deficit = max(1, args.target_per_cat - collected)
-                cat_weights.append(_math.sqrt(deficit))
+                cat_weights.append(math.sqrt(deficit))
 
             remaining = list(range(len(active_cats)))
             visit_order = []
@@ -1310,7 +1360,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                             log.info(
                                 "   ⏸  Slot pause %.1fs ...", intra_delay,
                             )
-                            await __import__("asyncio").sleep(intra_delay)
+                            await asyncio.sleep(intra_delay)
 
                     # ── Insert all slot jobs at once ───────────────────
                     if slot_jobs and db is not None and run_id is not None:
@@ -1331,6 +1381,13 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                     cat_state["collected"] += inserted
                     total_inserted_session += inserted
                     total_pages_session += len(selected)
+                    # Track per-category session stats
+                    cs = session_stats.setdefault(
+                        cat_uid, {"seen": 0, "inserted": 0, "dups": 0}
+                    )
+                    cs["seen"] += len(slot_jobs)
+                    cs["inserted"] += inserted
+                    cs["dups"] += dups
                     if inserted > 0:
                         session_made_progress = True
 
@@ -1350,7 +1407,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                         log.info(
                             "   ⏳ Waiting %ds before next tier...", delay,
                         )
-                        await __import__("asyncio").sleep(delay)
+                        await asyncio.sleep(delay)
 
             if not session_made_progress:
                 log.info(
@@ -1363,6 +1420,7 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
         if db is not None:
             for cat_uid, run_id in session_run_ids.items():
                 cat_state = state.get(cat_uid, {})
+                cs = session_stats.get(cat_uid, {})
                 try:
                     db.finish_scrape_run(
                         run_id=run_id,
@@ -1371,9 +1429,9 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
                             for t in cat_state.get("tiers", {}).values()
                             for tz_s in t.get("timezones", {}).values()
                         ),
-                        jobs_collected=cat_state.get("collected", 0),
-                        jobs_inserted=cat_state.get("collected", 0),
-                        jobs_skipped=0,
+                        jobs_collected=cs.get("seen", 0),
+                        jobs_inserted=cs.get("inserted", 0),
+                        jobs_skipped=cs.get("dups", 0),
                         status="done",
                     )
                 except Exception as exc:
@@ -1414,11 +1472,9 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
         )
     log.info("═" * 60)
 
-    # Reset state to zero baseline for next session
-    for _, uid in all_cats:
-        state[uid] = _default_cat_state()
+    # Save final state (cumulative progress preserved for next session)
     save_state(state)
-    log.info("🧹 Chaos state reset to zero baseline for next session.")
+    log.info("💾 Chaos state saved for next session.")
 
 
 async def _cmd_warmup(args: argparse.Namespace) -> None:
@@ -1561,6 +1617,10 @@ def _cmd_collect_proxy_usage(args: argparse.Namespace) -> None:
 
 def main() -> None:
     """Dispatch CLI command."""
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
+
     args = _parse_args()
 
     if args.command == "scrape-categories":

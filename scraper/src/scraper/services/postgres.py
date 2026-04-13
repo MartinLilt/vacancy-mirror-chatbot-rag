@@ -143,9 +143,47 @@ class ScraperPostgresService:
             db_url: Full connection string, e.g.
                 ``postgresql://user:pass@host:5432/dbname``.
         """
+        self._db_url = db_url
         self.conn = psycopg2.connect(db_url)
         self.conn.autocommit = False
         log.info("ScraperPostgresService connected.")
+
+    def _ensure_connection(self) -> None:
+        """Reconnect if the current connection is dead."""
+        try:
+            if self.conn and not self.conn.closed:
+                # Lightweight check — execute a no-op query
+                with self.conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                return
+        except Exception:
+            pass
+        log.warning("DB connection lost — reconnecting...")
+        try:
+            if self.conn and not self.conn.closed:
+                self.conn.close()
+        except Exception:
+            pass
+        self.conn = psycopg2.connect(self._db_url)
+        self.conn.autocommit = False
+        log.info("DB reconnected successfully.")
+
+    def _execute_with_retry(self, operation, *args, **kwargs):
+        """Execute a DB operation with one reconnect-and-retry on failure.
+
+        Args:
+            operation: Callable that performs the DB work.
+            *args, **kwargs: Passed to the operation.
+
+        Returns:
+            Whatever the operation returns.
+        """
+        try:
+            return operation(*args, **kwargs)
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            log.warning("DB operation failed (%s), reconnecting and retrying...", exc)
+            self._ensure_connection()
+            return operation(*args, **kwargs)
 
     def close(self) -> None:
         """Close the database connection."""
@@ -171,6 +209,13 @@ class ScraperPostgresService:
         Returns:
             The new scrape_run ``id``.
         """
+        return self._execute_with_retry(
+            self._start_scrape_run_impl, category_uid, category_name
+        )
+
+    def _start_scrape_run_impl(
+        self, category_uid: str, category_name: str
+    ) -> int:
         with self.conn.cursor() as cur:
             cur.execute(
                 """
@@ -211,6 +256,22 @@ class ScraperPostgresService:
             status: Final status string (``"done"`` or ``"failed"``).
             error_message: Optional error detail for failed runs.
         """
+        self._execute_with_retry(
+            self._finish_scrape_run_impl,
+            run_id, pages_collected, jobs_collected,
+            jobs_inserted, jobs_skipped, status, error_message,
+        )
+
+    def _finish_scrape_run_impl(
+        self,
+        run_id: int,
+        pages_collected: int,
+        jobs_collected: int,
+        jobs_inserted: int,
+        jobs_skipped: int,
+        status: str,
+        error_message: str | None,
+    ) -> None:
         with self.conn.cursor() as cur:
             cur.execute(
                 """
@@ -266,6 +327,11 @@ class ScraperPostgresService:
         Returns:
             Set of job_uid strings already in ``raw_jobs``.
         """
+        return self._execute_with_retry(
+            self._fetch_known_uids_impl, category_uid
+        )
+
+    def _fetch_known_uids_impl(self, category_uid: str) -> set[str]:
         with self.conn.cursor() as cur:
             cur.execute(
                 "SELECT job_uid FROM raw_jobs WHERE category_uid = %s",
@@ -329,6 +395,30 @@ class ScraperPostgresService:
             )
             return 0, len(jobs)
 
+        inserted = self._execute_with_retry(
+            self._insert_rows_impl, rows,
+        )
+
+        # Update the in-memory set with newly inserted uids
+        if known_uids is not None:
+            for row in rows:
+                known_uids.add(row[3])
+
+        total_dups = pre_dups + (len(rows) - inserted)
+        log.info(
+            "Inserted %d/%d raw jobs — %d pre-filtered + %d DB dups "
+            "(category=%s, run=%d).",
+            inserted,
+            len(jobs),
+            pre_dups,
+            len(rows) - inserted,
+            category_uid,
+            scrape_run_id,
+        )
+        return inserted, total_dups
+
+    def _insert_rows_impl(self, rows: list[tuple[Any, ...]]) -> int:
+        """Execute the actual INSERT INTO raw_jobs."""
         with self.conn.cursor() as cur:
             execute_values(
                 cur,
@@ -361,24 +451,7 @@ class ScraperPostgresService:
             )
             inserted: int = cur.rowcount
         self.conn.commit()
-
-        # Update the in-memory set with newly inserted uids
-        if known_uids is not None:
-            for row in rows:
-                known_uids.add(row[3])
-
-        total_dups = pre_dups + (len(rows) - inserted)
-        log.info(
-            "Inserted %d/%d raw jobs — %d pre-filtered + %d DB dups "
-            "(category=%s, run=%d).",
-            inserted,
-            len(jobs),
-            pre_dups,
-            len(rows) - inserted,
-            category_uid,
-            scrape_run_id,
-        )
-        return inserted, total_dups
+        return inserted
 
     # ------------------------------------------------------------------
     # Proxy usage snapshots
@@ -395,6 +468,22 @@ class ScraperPostgresService:
         raw_payload: dict[str, Any],
     ) -> int:
         """Store one proxy usage snapshot row and return inserted id."""
+        return self._execute_with_retry(
+            self._insert_proxy_usage_snapshot_impl,
+            provider, source_endpoint, requests_used,
+            bytes_used, bytes_remaining, bytes_limit, raw_payload,
+        )
+
+    def _insert_proxy_usage_snapshot_impl(
+        self,
+        provider: str,
+        source_endpoint: str,
+        requests_used: int | None,
+        bytes_used: int | None,
+        bytes_remaining: int | None,
+        bytes_limit: int | None,
+        raw_payload: dict[str, Any],
+    ) -> int:
         with self.conn.cursor() as cur:
             cur.execute(
                 """

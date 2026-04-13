@@ -264,7 +264,6 @@ def status() -> dict:
             started_at = None
             if pid:
                 try:
-                    import time as _time
                     hz = os.sysconf("SC_CLK_TCK")
                     proc_stat = open(f"/proc/{pid}/stat").read().split()
                     uptime_secs = float(open("/proc/uptime").read().split()[0])

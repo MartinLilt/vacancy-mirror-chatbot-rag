@@ -45,7 +45,6 @@ COPY src/ src/
 COPY scripts/ scripts/
 COPY crontab /tmp/crontab-user
 COPY crontab.crond /etc/cron.d/scraper-cron
-COPY entrypoint.sh /app/entrypoint.sh
 COPY supervisord.conf /etc/supervisor/conf.d/scraper.conf
 
 # Install Python dependencies
@@ -58,16 +57,21 @@ RUN pip install --no-cache-dir -e .
 RUN chmod 0644 /etc/cron.d/scraper-cron && \
     crontab /tmp/crontab-user && \
     rm /tmp/crontab-user && \
-    chmod +x /app/entrypoint.sh && \
-    chmod +x /app/scripts/scraper_runner.sh && \
-    chmod +x /app/scripts/chaos_runner.sh
+    chmod +x /app/scripts/chaos_runner.sh && \
+    chmod +x /app/scripts/collect_proxy_usage_runner.sh
 
 # Create state directory (will be mounted as volume)
 RUN mkdir -p /app/data
 
+# Create log file so tail doesn't fail on first /logs API call
+RUN touch /var/log/scraper.log
+
 ENV CHROME_PATH=/usr/bin/chromium
 ENV LOG_LEVEL=INFO
 ENV PYTHONUNBUFFERED=1
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD curl -sf http://localhost:8000/health || exit 1
 
 # supervisord manages: cron + scraper-api (uvicorn)
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/scraper.conf"]

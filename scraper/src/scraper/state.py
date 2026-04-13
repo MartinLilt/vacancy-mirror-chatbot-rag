@@ -109,13 +109,20 @@ class ScraperState:
             checkpoint["started_at"] = datetime.now().date().isoformat()
 
         try:
-            with open(self.state_file, "w", encoding="utf-8") as f:
+            tmp = self.state_file.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(checkpoint, f, indent=2)
+            tmp.replace(self.state_file)  # atomic rename
             log.info(
                 f"Checkpoint saved: page {current_page}/{total_pages}"
             )
         except Exception as exc:  # noqa: BLE001
             log.error(f"Failed to save checkpoint: {exc}")
+            # Clean up temp file if rename failed
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def reset_for_new_week(self) -> None:
         """Reset state for a new week (Monday).
@@ -151,8 +158,10 @@ class ScraperState:
         checkpoint = self.load_checkpoint()
         checkpoint["week_expired"] = True
         try:
-            with open(self.state_file, "w", encoding="utf-8") as f:
+            tmp = self.state_file.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(checkpoint, f, indent=2)
+            tmp.replace(self.state_file)
             log.info("Marked week as expired")
         except Exception as exc:  # noqa: BLE001
             log.error(f"Failed to mark week expired: {exc}")
