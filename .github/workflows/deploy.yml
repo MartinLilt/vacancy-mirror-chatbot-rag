@@ -271,6 +271,36 @@ jobs:
       (needs.preflight.outputs.deploy_target == 'both' || needs.preflight.outputs.deploy_target == 'scraper') &&
       needs.build-scraper.result == 'success'
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Copy Grafana provisioning files (dashboards + datasources) ──────────
+      # Grafana mounts /etc/vacancy-mirror/grafana/provisioning from the host.
+      # CI/CD must sync these files so dashboard changes take effect without
+      # manually SSH-ing to the server.
+      - name: Sync Grafana provisioning to scraper server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SCRAPER_SERVER_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 2222
+          source: "infra/monitoring/grafana/provisioning/"
+          target: "/etc/vacancy-mirror/grafana/provisioning/"
+          strip_components: 4   # strips infra/monitoring/grafana/provisioning prefix
+
+      # ── Copy Prometheus config ──────────────────────────────────────────────
+      - name: Sync Prometheus config to scraper server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SCRAPER_SERVER_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 2222
+          source: "infra/monitoring/prometheus.yml"
+          target: "/etc/vacancy-mirror/prometheus.yml"
+          strip_components: 2   # strips infra/monitoring prefix
+
       - name: Deploy to scraper server
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -306,6 +336,17 @@ jobs:
             # Show recent logs
             echo "📝 Recent logs:"
             docker compose logs --tail 20 scraper
+
+            # ── Reload Grafana provisioning (dashboard + datasource changes) ──
+            # Grafana watches /etc/grafana/provisioning for file changes when
+            # GF_PATHS_PROVISIONING_RELOAD_DISABLE is not set; SIGHUP forces
+            # an immediate re-read without losing stored state/history.
+            echo "🔄 Reloading Grafana provisioning..."
+            docker kill --signal=SIGHUP grafana && echo "✅ Grafana reloaded" || echo "⚠️ Grafana reload failed (non-fatal)"
+
+            # ── Reload Prometheus config ────────────────────────────────────
+            echo "🔄 Reloading Prometheus config..."
+            docker kill --signal=SIGHUP prometheus && echo "✅ Prometheus reloaded" || echo "⚠️ Prometheus reload failed (non-fatal)"
             
             echo "✅ Scraper deployment complete!"
 
