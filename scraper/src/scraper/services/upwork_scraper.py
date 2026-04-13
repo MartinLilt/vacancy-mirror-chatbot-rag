@@ -497,10 +497,11 @@ _TIER_TOKEN_MAP: list[tuple[str, int]] = [
 def _extract_tier_counts(nuxt: dict[str, Any]) -> dict[int, int]:
     """Return per-tier job counts ``{1: entry, 2: intermediate, 3: expert}``.
 
-    Reads the same Experience Level filter buckets as
-    ``_extract_total_from_filters`` but returns individual tier counts
-    instead of the sum.  Tier numbers mirror Upwork's ``contractor_tier``
-    query parameter.
+    Reads Experience Level filter buckets from the NUXT state.
+    NOTE: FlareSolverr often does NOT include ``state.jobsFilters.filters``
+    in the SSR payload, so this may return ``{}`` even on valid pages.
+    The chaos scraper uses direct tier-filtered probes as the primary source
+    of ``real_max_page`` and treats this as a bonus when available.
 
     Returns an empty dict if the buckets cannot be found.
     """
@@ -510,18 +511,30 @@ def _extract_tier_counts(nuxt: dict[str, Any]) -> dict[int, int]:
     jobs_filters: dict = state.get("jobsFilters", {})
     filters = jobs_filters.get("filters")
     if filters and isinstance(filters, list):
+        log.debug(
+            "🔬 jobsFilters.filters present (%d groups) — trying tier extraction",
+            len(filters),
+        )
         result = _parse_tier_buckets(filters)
         if result:
             return result
+    else:
+        log.debug(
+            "🔬 jobsFilters.filters absent (jobsFilters keys: %s)",
+            list(jobs_filters.keys()) if jobs_filters else "[]",
+        )
 
     # Fallback: scan all state keys for a list that looks like filter groups
-    for state_val in state.values():
+    for state_key, state_val in state.items():
         if not isinstance(state_val, dict):
             continue
         for val in state_val.values():
             if isinstance(val, list):
                 result = _parse_tier_buckets(val)
                 if result:
+                    log.debug(
+                        "🔬 tier_counts found in state[%r] fallback", state_key
+                    )
                     return result
 
     return {}
