@@ -88,6 +88,12 @@ MAX_START_DELAY=600   # up to 10 minutes
 USER_DATA_DIR="/app/data/chrome_profile"
 mkdir -p "$USER_DATA_DIR"
 
+# Remove stale Chrome Singleton locks left by previous container incarnations.
+# Chrome refuses to start if these point to a hostname that no longer exists.
+rm -f "$USER_DATA_DIR/SingletonLock" \
+      "$USER_DATA_DIR/SingletonCookie" \
+      "$USER_DATA_DIR/SingletonSocket" 2>/dev/null
+
 # State file
 STATE_FILE="/app/data/chaos_state.json"
 
