@@ -113,31 +113,32 @@ else
     echo "🆕 No checkpoint — starting fresh"
 fi
 
-# 4. Monday → reset state
-if [ "$WEEKDAY" -eq 1 ]; then
-    echo "🗓️  Monday — new week, resetting state"
-    rm -f "$STATE_FILE"
+# 4. Monday → reset state (new week)
+if [ "$WEEKDAY" -eq 1 ] && [ ! -f "$STATE_FILE" ]; then
+    echo "🗓️  Monday (first iteration) — new week, resetting state"
     CURRENT_PAGE=1
     WEEK_EXPIRED="false"
     COMPLETED="false"
-    
+fi
+
+# 4a. Inspect-category: first iteration of the day (8:00) OR no saved state
+if [ "$CURRENT_HOUR" -eq "$START_HOUR" ] || [ ! -f "$STATE_FILE" ]; then
     echo ""
-    echo "🔍 Monday check: Verifying category UIDs and levels..."
-    echo "   Running category inspection before main scrape..."
+    echo "🔍 Running inspect-category (reason: $([ "$CURRENT_HOUR" -eq "$START_HOUR" ] && echo "first iteration of the day" || echo "no saved state"))..."
     echo ""
-    
-    # Run category check to verify UID and detect current level
+
     python -m scraper.cli inspect-category \
         --name "$CATEGORY_NAME" \
         --expected-uid "$CATEGORY_UID"
-    
+
     INSPECT_EXIT=$?
     if [ $INSPECT_EXIT -ne 0 ]; then
         echo "⚠️  Category inspection failed, but continuing with scrape..."
     fi
-    
+
     echo ""
-    # Note: DB cleanup happens in Python code
+else
+    echo "⏩ Skipping inspect — state exists, not first iteration"
 fi
 
 # 5. Week expired? → wait until Monday
