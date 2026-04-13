@@ -72,7 +72,17 @@ class FlareSolverrClient:
             payload["proxy"] = self._build_proxy_payload(proxy)
 
         logger.info(f"Requesting FlareSolverr to solve: {url}")
-        logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
+        # Redact proxy credentials from debug logs
+        if logger.isEnabledFor(logging.DEBUG):
+            safe_payload = dict(payload)
+            if "proxy" in safe_payload:
+                safe_proxy = dict(safe_payload["proxy"])
+                if "username" in safe_proxy:
+                    safe_proxy["username"] = "***"
+                if "password" in safe_proxy:
+                    safe_proxy["password"] = "***"
+                safe_payload["proxy"] = safe_proxy
+            logger.debug(f"Payload: {json.dumps(safe_payload, indent=2)}")
 
         try:
             req = request.Request(

@@ -16,6 +16,18 @@ export PATH=/usr/local/bin:$PATH
 
 set -e
 
+# ── Truncate log to prevent unbounded growth ──────────────────────────────
+# Keep last 5000 lines.  Runs before every session so the file stays
+# manageable even after weeks of 15 runs/day.
+LOG_FILE="/var/log/scraper.log"
+if [ -f "$LOG_FILE" ]; then
+  LOG_LINES=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+  if [ "$LOG_LINES" -gt 10000 ]; then
+    tail -n 5000 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+    echo "🧹 Log truncated: ${LOG_LINES} → 5000 lines"
+  fi
+fi
+
 # ── Recover env vars from PID 1 (supervisord) when running under cron ────────
 # Cron executes with a minimal environment and does NOT inherit the container's
 # env vars set by docker-compose.  We read them from /proc/1/environ (the env
