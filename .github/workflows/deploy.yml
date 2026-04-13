@@ -271,83 +271,75 @@ jobs:
       (needs.preflight.outputs.deploy_target == 'both' || needs.preflight.outputs.deploy_target == 'scraper') &&
       needs.build-scraper.result == 'success'
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # ── Copy Grafana provisioning files (dashboards + datasources) ──────────
-      # Grafana mounts /etc/vacancy-mirror/grafana/provisioning from the host.
-      # CI/CD must sync these files so dashboard changes take effect without
-      # manually SSH-ing to the server.
-      - name: Sync Grafana provisioning to scraper server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SCRAPER_SERVER_IP }}
-          username: root
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 2222
-          source: "infra/monitoring/grafana/provisioning/"
-          target: "/etc/vacancy-mirror/grafana/provisioning/"
-          strip_components: 4   # strips infra/monitoring/grafana/provisioning prefix
-
-      # ── Copy Prometheus config ──────────────────────────────────────────────
-      - name: Sync Prometheus config to scraper server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SCRAPER_SERVER_IP }}
-          username: root
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 2222
-          source: "infra/monitoring/prometheus.yml"
-          target: "/etc/vacancy-mirror/prometheus.yml"
-          strip_components: 2   # strips infra/monitoring prefix
-
       - name: Deploy to scraper server
         uses: appleboy/ssh-action@v1.0.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_SHA: ${{ github.sha }}
         with:
           host: ${{ secrets.SCRAPER_SERVER_IP }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 2222
+          envs: GH_TOKEN,GH_SHA
           script: |
             set -e
             echo "🚀 Deploying to Scraper Server..."
-            
+
+            # ── Sync Grafana provisioning + Prometheus config via GitHub API ──
+            # We download straight from the repo at the exact commit being
+            # deployed — no second SSH connection, no scp-action timeouts.
+            # GITHUB_TOKEN (read-only, scoped to this repo) is injected above.
+            RAW="https://raw.githubusercontent.com/MartinLilt/vacancy-mirror-chatbot-rag/${GH_SHA}"
+            AUTH="Authorization: Bearer ${GH_TOKEN}"
+
+            echo "📄 Syncing Grafana provisioning (commit ${GH_SHA:0:7})..."
+            mkdir -p /etc/vacancy-mirror/grafana/provisioning/dashboards
+            mkdir -p /etc/vacancy-mirror/grafana/provisioning/datasources
+
+            curl -fsSL -H "${AUTH}" \
+              "${RAW}/infra/monitoring/grafana/provisioning/dashboards/scraper.json" \
+              -o /etc/vacancy-mirror/grafana/provisioning/dashboards/scraper.json
+            echo "  ✅ scraper.json"
+
+            curl -fsSL -H "${AUTH}" \
+              "${RAW}/infra/monitoring/grafana/provisioning/datasources/datasources.yml" \
+              -o /etc/vacancy-mirror/grafana/provisioning/datasources/datasources.yml
+            echo "  ✅ datasources.yml"
+
+            curl -fsSL -H "${AUTH}" \
+              "${RAW}/infra/monitoring/prometheus.yml" \
+              -o /etc/vacancy-mirror/prometheus.yml
+            echo "  ✅ prometheus.yml"
+
+            # ── Pull and restart scraper container ────────────────────────────
             cd /etc/vacancy-mirror
-            
-            # Pull new image
+
             echo "📥 Pulling scraper image..."
             docker compose pull scraper
-            
-            # Recreate container
+
             echo "🔄 Recreating scraper container..."
             docker compose up -d scraper
-            
-            # Wait for container to start
+
             sleep 5
-            
-            # Check status
+
             echo "📊 Container status:"
             docker compose ps scraper
-            
-            # Health check
+
             echo "🏥 Health check:"
             curl -sf http://localhost:8000/health || echo "Health check failed"
-            
-            # Show recent logs
+
             echo "📝 Recent logs:"
             docker compose logs --tail 20 scraper
 
-            # ── Reload Grafana provisioning (dashboard + datasource changes) ──
-            # Grafana watches /etc/grafana/provisioning for file changes when
-            # GF_PATHS_PROVISIONING_RELOAD_DISABLE is not set; SIGHUP forces
-            # an immediate re-read without losing stored state/history.
+            # ── Reload Grafana provisioning ───────────────────────────────────
             echo "🔄 Reloading Grafana provisioning..."
-            docker kill --signal=SIGHUP grafana && echo "✅ Grafana reloaded" || echo "⚠️ Grafana reload failed (non-fatal)"
+            docker kill --signal=SIGHUP grafana && echo "  ✅ Grafana reloaded" || echo "  ⚠️ Grafana reload failed (non-fatal)"
 
-            # ── Reload Prometheus config ────────────────────────────────────
+            # ── Reload Prometheus config ──────────────────────────────────────
             echo "🔄 Reloading Prometheus config..."
-            docker kill --signal=SIGHUP prometheus && echo "✅ Prometheus reloaded" || echo "⚠️ Prometheus reload failed (non-fatal)"
-            
+            docker kill --signal=SIGHUP prometheus && echo "  ✅ Prometheus reloaded" || echo "  ⚠️ Prometheus reload failed (non-fatal)"
+
             echo "✅ Scraper deployment complete!"
 
       - name: Verify deployment
