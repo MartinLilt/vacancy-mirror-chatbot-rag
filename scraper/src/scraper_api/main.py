@@ -242,7 +242,52 @@ def health() -> dict:
 @app.get("/status")
 def status() -> dict:
     with _scraper_lock:
-        return dict(_scraper_state)
+        state = dict(_scraper_state)
+
+    # If the API already knows it's running, trust that.
+    if state["status"] == "running":
+        return state
+
+    # Also detect scraper processes started by cron (outside the API).
+    # cron runs chaos_runner.sh → python -m scraper.cli scrape-chaos
+    # The FastAPI in-memory state is NOT updated in that case, so we fall
+    # back to a pgrep check on the process table.
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "scraper.cli scrape-chaos"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if result.returncode == 0:
+            pids = [p for p in result.stdout.strip().split("\n") if p]
+            pid = int(pids[0]) if pids else None
+            # Approximate start time from /proc/<pid>/stat field 22 (clock ticks since boot)
+            started_at = None
+            if pid:
+                try:
+                    import time as _time
+                    hz = os.sysconf("SC_CLK_TCK")
+                    proc_stat = open(f"/proc/{pid}/stat").read().split()
+                    uptime_secs = float(open("/proc/uptime").read().split()[0])
+                    start_ticks = float(proc_stat[21])
+                    age_secs = uptime_secs - start_ticks / hz
+                    from datetime import datetime, timezone, timedelta
+                    started_at = (
+                        datetime.now(timezone.utc) - timedelta(seconds=age_secs)
+                    ).isoformat()
+                except Exception:
+                    pass
+            return {
+                "status": "running",
+                "pid": pid,
+                "started_at": started_at,
+                "category_uid": "chaos",
+                "category_name": "chaos-all-categories (cron)",
+                "max_pages": None,
+            }
+    except Exception:
+        pass
+
+    return state
 
 
 @app.get("/categories")

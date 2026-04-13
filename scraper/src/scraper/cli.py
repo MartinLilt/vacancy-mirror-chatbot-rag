@@ -975,7 +975,12 @@ async def _cmd_scrape_chaos(args: argparse.Namespace) -> None:
             known_uids[cat_uid] = set()
 
     # ── Browser ───────────────────────────────────────────────────────
+    # CHROME_PATH is injected by chaos_runner.sh (read from /proc/1/environ
+    # so it works in cron where container env vars are not inherited).
+    # Falls back to the Debian chromium package location used in the image.
+    chrome_path = os.getenv("CHROME_PATH", "/usr/bin/chromium") or "/usr/bin/chromium"
     service = UpworkScraperService(
+        chrome_path=chrome_path,
         page_delay_min=float(args.delay_min),
         page_delay_max=float(args.delay_max),
         user_data_dir=user_data_dir,
