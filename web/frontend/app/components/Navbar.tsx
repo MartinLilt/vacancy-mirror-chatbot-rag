@@ -49,7 +49,7 @@ export default function Navbar() {
 
         {/* CTA */}
         <a
-          href="https://t.me/VacancyMirrorBot"
+          href="https://t.me/VacancyMirror"
           target="_blank"
           rel="noopener noreferrer"
           className="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"

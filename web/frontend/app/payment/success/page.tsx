@@ -1,10 +1,9 @@
 "use client";
 
-
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 
-const BOT_URL = "https://t.me/VacancyMirrorBot";
+const BOT_URL = "https://t.me/VacancyMirror";
 
 function SuccessContent() {
   const params = useSearchParams();
