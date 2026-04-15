@@ -715,7 +715,32 @@ class UpworkScraperService:
         self.flaresolverr_rotate_after_timeouts = int(
             os.environ.get("FLARESOLVERR_ROTATE_AFTER_TIMEOUTS", "2")
         )
+        self.flaresolverr_rotate_after_tunnel_errors = int(
+            os.environ.get("FLARESOLVERR_ROTATE_AFTER_TUNNEL_ERRORS", "2")
+        )
+        self.flaresolverr_rotate_after_cf_blocks = int(
+            os.environ.get("FLARESOLVERR_ROTATE_AFTER_CF_BLOCKS", "2")
+        )
+        self.flaresolverr_session_ttl_sec = int(
+            os.environ.get("FLARESOLVERR_SESSION_TTL_SEC", "1800")
+        )
+        self.flaresolverr_max_requests_per_session = int(
+            os.environ.get("FLARESOLVERR_MAX_REQUESTS_PER_SESSION", "80")
+        )
+        self.flaresolverr_direct_fallback_on_proxy_error = (
+            os.environ.get("FLARESOLVERR_DIRECT_FALLBACK_ON_PROXY_ERROR", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.flaresolverr_use_sessions = (
+            os.environ.get("FLARESOLVERR_USE_SESSIONS", "1").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         self._flaresolverr_timeout_streak = 0
+        self._flaresolverr_tunnel_error_streak = 0
+        self._flaresolverr_cf_block_streak = 0
+        self._flaresolverr_session_id: str | None = None
+        self._proxy_session_started_at: float = 0.0
+        self._proxy_session_requests: int = 0
 
     def _random_delay(self) -> float:
         """Return a uniformly sampled delay from [min, max].
@@ -893,12 +918,18 @@ class UpworkScraperService:
         """
         log.info("🔥 Solving Cloudflare with FlareSolverr for: %s", url)
         try:
+            self._maybe_rotate_proxy_session_before_request()
+            session_id = self._ensure_flaresolverr_session()
             solution = self.flaresolverr.solve(
                 url=url,
                 max_timeout=self.flaresolverr_max_timeout_ms,
                 proxy=self.flaresolverr_proxy_url,
+                session=session_id,
             )
             self._flaresolverr_timeout_streak = 0
+            self._flaresolverr_tunnel_error_streak = 0
+            self._flaresolverr_cf_block_streak = 0
+            self._proxy_session_requests += 1
 
             log.info(
                 "✅ FlareSolverr solved! Cookies: %d, HTML: %d bytes",
@@ -911,12 +942,20 @@ class UpworkScraperService:
             err = str(e)
             # If proxy tunnel is flaky, one direct retry is often enough.
             if (
-                self.flaresolverr_proxy_url
+                self.flaresolverr_direct_fallback_on_proxy_error
+                and self.flaresolverr_proxy_url
                 and (
                     "ERR_TUNNEL_CONNECTION_FAILED" in err
                     or "ERR_PROXY_CONNECTION_FAILED" in err
                 )
             ):
+                self._flaresolverr_tunnel_error_streak += 1
+                if (
+                    self._flaresolverr_tunnel_error_streak
+                    >= self.flaresolverr_rotate_after_tunnel_errors
+                ):
+                    self._rotate_flaresolverr_proxy_session("tunnel_error_streak")
+                    self._flaresolverr_tunnel_error_streak = 0
                 log.warning(
                     "🔁 FlareSolverr proxy tunnel error; retrying once without proxy"
                 )
@@ -925,8 +964,12 @@ class UpworkScraperService:
                         url=url,
                         max_timeout=self.flaresolverr_max_timeout_ms,
                         proxy=None,
+                        session=None,
                     )
                     self._flaresolverr_timeout_streak = 0
+                    self._flaresolverr_tunnel_error_streak = 0
+                    self._flaresolverr_cf_block_streak = 0
+                    self._proxy_session_requests += 1
                     log.info(
                         "✅ FlareSolverr direct fallback solved! Cookies: %d, HTML: %d bytes",
                         len(solution.get("cookies", [])),
@@ -935,6 +978,26 @@ class UpworkScraperService:
                     return solution
                 except Exception as fallback_exc:
                     err = str(fallback_exc)
+
+            if (
+                self.flaresolverr_proxy_url
+                and (
+                    "ERR_TUNNEL_CONNECTION_FAILED" in err
+                    or "ERR_PROXY_CONNECTION_FAILED" in err
+                )
+            ):
+                self._flaresolverr_tunnel_error_streak += 1
+                log.warning(
+                    "⛔ FlareSolverr tunnel-error streak=%d/%d",
+                    self._flaresolverr_tunnel_error_streak,
+                    self.flaresolverr_rotate_after_tunnel_errors,
+                )
+                if (
+                    self._flaresolverr_tunnel_error_streak
+                    >= self.flaresolverr_rotate_after_tunnel_errors
+                ):
+                    self._rotate_flaresolverr_proxy_session("tunnel_error_streak")
+                    self._flaresolverr_tunnel_error_streak = 0
 
             if self._is_flaresolverr_timeout_error(err):
                 self._flaresolverr_timeout_streak += 1
@@ -947,12 +1010,55 @@ class UpworkScraperService:
                     self._flaresolverr_timeout_streak
                     >= self.flaresolverr_rotate_after_timeouts
                 ):
-                    self._rotate_flaresolverr_proxy_session()
+                    self._rotate_flaresolverr_proxy_session("timeout_streak")
                     self._flaresolverr_timeout_streak = 0
             log.error("❌ FlareSolverr failed: %s", e)
             raise RuntimeError(
                 f"Could not bypass Cloudflare with FlareSolverr: {e}"
             ) from e
+
+    @staticmethod
+    def _new_flaresolverr_session_id() -> str:
+        return f"vm-{int(time.time())}-{random.randint(100000, 999999)}"
+
+    def _ensure_flaresolverr_session(self) -> str | None:
+        if not self.flaresolverr_use_sessions:
+            return None
+        if self._flaresolverr_session_id:
+            return self._flaresolverr_session_id
+        session_id = self._new_flaresolverr_session_id()
+        try:
+            self._flaresolverr_session_id = self.flaresolverr.create_session(session_id)
+            self._proxy_session_started_at = time.time()
+            self._proxy_session_requests = 0
+            log.info("🧷 FlareSolverr sticky session created: %s", self._flaresolverr_session_id)
+        except Exception as exc:
+            log.warning("FlareSolverr session create failed; falling back without session: %s", exc)
+            self._flaresolverr_session_id = None
+        return self._flaresolverr_session_id
+
+    def _close_flaresolverr_session(self) -> None:
+        if not self._flaresolverr_session_id:
+            return
+        try:
+            self.flaresolverr.destroy_session(self._flaresolverr_session_id)
+        finally:
+            self._flaresolverr_session_id = None
+
+    def _maybe_rotate_proxy_session_before_request(self) -> None:
+        if self._proxy_session_started_at <= 0:
+            return
+        if (
+            self.flaresolverr_session_ttl_sec > 0
+            and (time.time() - self._proxy_session_started_at) >= self.flaresolverr_session_ttl_sec
+        ):
+            self._rotate_flaresolverr_proxy_session("session_ttl")
+            return
+        if (
+            self.flaresolverr_max_requests_per_session > 0
+            and self._proxy_session_requests >= self.flaresolverr_max_requests_per_session
+        ):
+            self._rotate_flaresolverr_proxy_session("session_request_cap")
 
     @staticmethod
     def _is_flaresolverr_timeout_error(error_text: str) -> bool:
@@ -979,7 +1085,7 @@ class UpworkScraperService:
 
         return None
 
-    def _rotate_flaresolverr_proxy_session(self) -> None:
+    def _rotate_flaresolverr_proxy_session(self, reason: str) -> None:
         proxy = self.flaresolverr_proxy_url
         if not proxy:
             return
@@ -1012,7 +1118,13 @@ class UpworkScraperService:
         self.flaresolverr_proxy_url = rotated_proxy
         if self.proxy_url == proxy:
             self.proxy_url = rotated_proxy
-        log.warning("🔁 Rotated FlareSolverr proxy session username")
+        self._close_flaresolverr_session()
+        self._proxy_session_started_at = 0.0
+        self._proxy_session_requests = 0
+        self._flaresolverr_timeout_streak = 0
+        self._flaresolverr_tunnel_error_streak = 0
+        self._flaresolverr_cf_block_streak = 0
+        log.warning("🔁 Rotated FlareSolverr proxy session username (reason=%s)", reason)
 
     async def stop_browser(self) -> None:
         """Close the browser gracefully.
@@ -1022,6 +1134,7 @@ class UpworkScraperService:
         """
         if self.browser:
             await self._export_cookies()
+            self._close_flaresolverr_session()
             self.browser.stop()
             self.browser = None
             self.page = None
@@ -1446,6 +1559,13 @@ class UpworkScraperService:
 
                 # ── Detect Chrome network error page (broken proxy) ────
                 if _is_chrome_error_page(html):
+                    self._flaresolverr_tunnel_error_streak += 1
+                    if (
+                        self._flaresolverr_tunnel_error_streak
+                        >= self.flaresolverr_rotate_after_tunnel_errors
+                    ):
+                        self._rotate_flaresolverr_proxy_session("chrome_error_page")
+                        self._flaresolverr_tunnel_error_streak = 0
                     # Log first 300 chars of HTML to help diagnose
                     log.error(
                         "🔌 FlareSolverr proxy BROKEN on page %d "
@@ -1460,6 +1580,13 @@ class UpworkScraperService:
 
                 # ── Detect Cloudflare / ban page ───────────────────────
                 if _is_cloudflare_block(html):
+                    self._flaresolverr_cf_block_streak += 1
+                    if (
+                        self._flaresolverr_cf_block_streak
+                        >= self.flaresolverr_rotate_after_cf_blocks
+                    ):
+                        self._rotate_flaresolverr_proxy_session("cf_block_streak")
+                        self._flaresolverr_cf_block_streak = 0
                     log.error(
                         "🚫 FlareSolverr could not bypass Cloudflare "
                         "on page %d (attempt %d/%d)",
@@ -1473,6 +1600,8 @@ class UpworkScraperService:
                     "� [page %d] FlareSolverr HTML: %d bytes, cookies: %d",
                     page_num, len(html), len(solution.get("cookies", [])),
                 )
+                self._flaresolverr_tunnel_error_streak = 0
+                self._flaresolverr_cf_block_streak = 0
 
                 # ── Step 2: write HTML into Chrome so scripts execute ──
                 await self.page.evaluate(

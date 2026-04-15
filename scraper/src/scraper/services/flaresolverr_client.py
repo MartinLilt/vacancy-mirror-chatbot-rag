@@ -46,7 +46,11 @@ class FlareSolverrClient:
         return payload
 
     def solve(
-        self, url: str, max_timeout: int = 60000, proxy: str | None = None
+        self,
+        url: str,
+        max_timeout: int = 60000,
+        proxy: str | None = None,
+        session: str | None = None,
     ) -> dict[str, Any]:
         """
         Solve Cloudflare challenge for a given URL.
@@ -55,6 +59,7 @@ class FlareSolverrClient:
             url: Target URL to solve
             max_timeout: Maximum timeout in milliseconds (default: 60s)
             proxy: Optional proxy URL (format: http://user:pass@host:port)
+            session: Optional FlareSolverr session id for sticky reuse
 
         Returns:
             Dict with 'cookies', 'userAgent', and 'html' keys
@@ -70,6 +75,8 @@ class FlareSolverrClient:
 
         if proxy:
             payload["proxy"] = self._build_proxy_payload(proxy)
+        if session:
+            payload["session"] = session
 
         logger.info(f"Requesting FlareSolverr to solve: {url}")
         # Redact proxy credentials from debug logs
@@ -135,3 +142,55 @@ class FlareSolverrClient:
             raise RuntimeError(
                 f"FlareSolverr unexpected error: {e}"
             ) from e
+
+    def create_session(self, session_id: str) -> str:
+        """Create a FlareSolverr browser session and return its id."""
+        payload = {
+            "cmd": "sessions.create",
+            "session": session_id,
+        }
+        logger.info("Creating FlareSolverr session: %s", session_id)
+        try:
+            req = request.Request(
+                self.api_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            if result.get("status") != "ok":
+                raise RuntimeError(
+                    f"FlareSolverr failed to create session: {result.get('message', 'Unknown error')}"
+                )
+            session = result.get("session") or session_id
+            logger.info("FlareSolverr session ready: %s", session)
+            return str(session)
+        except Exception as e:
+            raise RuntimeError(f"FlareSolverr create_session error: {e}") from e
+
+    def destroy_session(self, session_id: str) -> None:
+        """Destroy a FlareSolverr browser session."""
+        payload = {
+            "cmd": "sessions.destroy",
+            "session": session_id,
+        }
+        logger.info("Destroying FlareSolverr session: %s", session_id)
+        try:
+            req = request.Request(
+                self.api_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            if result.get("status") != "ok":
+                logger.warning(
+                    "FlareSolverr could not destroy session %s: %s",
+                    session_id,
+                    result.get("message", "Unknown error"),
+                )
+        except Exception as e:
+            logger.warning("FlareSolverr destroy_session error for %s: %s", session_id, e)
+
