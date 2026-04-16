@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: scraper
+Version: 0.1.0
+Summary: Upwork vacancy scraper — headless Chrome + nodriver.
+Requires-Python: >=3.13
+Requires-Dist: nodriver>=0.28
+Requires-Dist: psycopg2-binary>=2.9
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: fastapi>=0.111
+Requires-Dist: uvicorn[standard]>=0.30
+Requires-Dist: pydantic>=2.4.0
