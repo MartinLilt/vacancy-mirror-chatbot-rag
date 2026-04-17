@@ -3,7 +3,7 @@ from __future__ import annotations
 import types
 import unittest
 
-from backend.services.telegram_bot import (
+from backend.services.bot.telegram import (
     AssistantRuntimeState,
     TRIAL_WAITING_QUERY,
     cmd_assistant_metrics,

@@ -51,16 +51,15 @@ from telegram.ext import (
     filters,
 )
 
-from backend.services.google_sheets import (
+from backend.services.integrations.google_sheets import (
     GoogleSheetsService,
     build_user_row,
 )
-from backend.services.chatwoot_client import ChatwootSupportClient
-from backend.services.assistant_infer_client import AssistantInferClient
-from backend.services.openai import OpenAIMarketAssistantService
-from backend.services.postgres import PostgresJobExportService
-from backend.services.reasoning_orchestrator import ReasoningOrchestrator
-from backend.services.assistant_knowledge import AssistantSectionRetriever
+from backend.services.integrations.chatwoot import ChatwootSupportClient
+from backend.services.assistant.infer_client import AssistantInferClient
+from backend.services.assistant.openai import OpenAIMarketAssistantService
+from backend.services.data.postgres import PostgresJobExportService
+from backend.services.assistant.knowledge import AssistantSectionRetriever
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +83,7 @@ PLAN_LIMITS_24H: dict[str, int] = {
     "pro_plus": 120,
 }
 TRIAL_HISTORY_KEY = "trial_chat_history"
-TRIAL_HISTORY_MAX_MESSAGES = 8
+TRIAL_HISTORY_MAX_MESSAGES = 9
 
 # -- Callback data constants ---------------------------------------------
 CB_CHAT = "cb_chat"
@@ -694,9 +693,6 @@ async def trial_receive_query(
     assistant: OpenAIMarketAssistantService = context.bot_data[
         "assistant_llm"
     ]
-    orchestrator: ReasoningOrchestrator | None = context.bot_data.get(
-        "assistant_orchestrator"
-    )
     infer_client: AssistantInferClient | None = context.bot_data.get(
         "assistant_infer_client"
     )
@@ -749,7 +745,7 @@ async def trial_receive_query(
         acquired_global_slot = True
         runtime.active += 1
         started_at = time.monotonic()
-        route = "simple"
+        branches: list[str] = []
 
         plan = "free"
         limit = PLAN_LIMITS_24H["free"]
@@ -827,11 +823,10 @@ async def trial_receive_query(
             history = _get_trial_history(context)
             answer = ""
 
-            # Prefer replica inference cluster when configured.
             if infer_client is not None:
-                await _set_status("⚡ Processing with assistant cluster...")
+                await _set_status("⚡ Thinking...")
                 try:
-                    answer, route = await asyncio.wait_for(
+                    answer, branches = await asyncio.wait_for(
                         asyncio.to_thread(
                             infer_client.generate_answer,
                             question=prompt,
@@ -846,53 +841,20 @@ async def trial_receive_query(
                     )
                     log.warning("Remote assistant infer failed, fallback local: %s", remote_exc)
 
-            # Local fallback path keeps backward compatibility.
             if not answer:
-                if orchestrator is not None:
-                    loop = asyncio.get_running_loop()
-                    stage_map = {
-                        "layer1_start": "🧠 Step 1/3: Understanding your request...",
-                        "fast_path_start": "⚡ Fast mode: answering directly...",
-                        "layer2_start": "🧭 Step 2/3: Building response plan...",
-                        "layer3_start": "✍️ Step 3/3: Finalizing answer...",
-                    }
-
-                    def _on_stage(stage: str) -> None:
-                        text = stage_map.get(stage)
-                        if not text:
-                            return
-                        loop.call_soon_threadsafe(
-                            asyncio.create_task,
-                            _set_status(text),
-                        )
-
-                    timeout_sec = float(
-                        os.environ.get("ASSISTANT_ORCHESTRATOR_TIMEOUT_SEC", "90")
-                    )
-                    result = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            orchestrator.run,
-                            question=prompt,
-                            history=history,
-                            stage_callback=_on_stage,
-                        ),
-                        timeout=timeout_sec,
-                    )
-                    route = str(result.route or "long_path")
-                    answer = result.final_answer
-                else:
-                    await _set_status("🔎 Looking for relevant context...")
-                    timeout_sec = float(
-                        os.environ.get("ASSISTANT_SIMPLE_ANSWER_TIMEOUT_SEC", "90")
-                    )
-                    answer = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            assistant.answer_market_question,
-                            question=prompt,
-                        ),
-                        timeout=timeout_sec,
-                    )
-                    route = "simple"
+                await _set_status("⚡ Thinking...")
+                timeout_sec = float(
+                    os.environ.get("ASSISTANT_SIMPLE_ANSWER_TIMEOUT_SEC", "90")
+                )
+                answer = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        assistant.answer_with_history,
+                        question=prompt,
+                        history=history,
+                    ),
+                    timeout=timeout_sec,
+                )
+                branches = []
         except Exception as exc:  # noqa: BLE001
             fail_reasons.append(f"primary_path={type(exc).__name__}: {exc}")
             log.exception("Trial chat failed: %s", exc)
@@ -907,7 +869,7 @@ async def trial_receive_query(
                     ),
                     timeout=timeout_sec,
                 )
-                route = "simple"
+                branches = []
             except Exception as fallback_exc:  # noqa: BLE001
                 fail_reasons.append(
                     f"simple_fallback={type(fallback_exc).__name__}: {fallback_exc}"
@@ -2228,15 +2190,6 @@ class TelegramBotService:
             "ASSISTANT_GLOBAL_ACQUIRE_TIMEOUT_SEC",
             0.2,
         )
-        self.orchestrator_enabled = _env_flag(
-            "ASSISTANT_ORCHESTRATOR_ENABLED", default="1"
-        )
-        self.assistant_orchestrator: ReasoningOrchestrator | None = None
-        if self.orchestrator_enabled:
-            self.assistant_orchestrator = ReasoningOrchestrator(
-                llm=self.assistant_llm,
-                max_history_messages=TRIAL_HISTORY_MAX_MESSAGES,
-            )
 
     def _build_application(self) -> Application:
         """Build and configure the telegram Application."""
@@ -2251,7 +2204,6 @@ class TelegramBotService:
         app.bot_data["db"] = self.db
         app.bot_data["sheets"] = self.sheets
         app.bot_data["assistant_llm"] = self.assistant_llm
-        app.bot_data["assistant_orchestrator"] = self.assistant_orchestrator
         app.bot_data["assistant_infer_client"] = self.assistant_infer_client
         app.bot_data["assistant_remote_timeout_sec"] = self.assistant_remote_timeout_sec
         app.bot_data["assistant_runtime"] = AssistantRuntimeState(

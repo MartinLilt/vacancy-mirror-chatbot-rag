@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from backend.services.telegram_bot import (
+from backend.services.bot.telegram import (
     _normalize_telegram_text,
     _strip_telegram_markdown,
 )

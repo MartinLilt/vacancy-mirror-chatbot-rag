@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from backend.services.assistant_knowledge import (
+from backend.services.assistant.knowledge import (
     AssistantSectionRetriever,
     DEFAULT_KNOWLEDGE_SECTIONS,
 )

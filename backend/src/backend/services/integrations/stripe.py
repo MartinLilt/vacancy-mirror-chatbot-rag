@@ -30,12 +30,12 @@ import urllib.request
 import urllib.parse
 from typing import Any
 
-from backend.services.email_sender import SendGridEmailSender
-from backend.services.google_sheets import (
+from backend.services.integrations.email import SendGridEmailSender
+from backend.services.integrations.google_sheets import (
     GoogleSheetsService,
     build_user_row,
 )
-from backend.services.postgres import PostgresJobExportService
+from backend.services.data.postgres import PostgresJobExportService
 
 log = logging.getLogger(__name__)
 _SUPPORT_UNPIN_FAILED_MARKER = "SUPPORT_TICKET_UNPIN_FAILED"

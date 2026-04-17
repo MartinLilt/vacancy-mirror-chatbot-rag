@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from backend.services.email_sender import (
+from backend.services.integrations.email import (
     SendGridEmailSender,
     _render_support_email_html,
 )

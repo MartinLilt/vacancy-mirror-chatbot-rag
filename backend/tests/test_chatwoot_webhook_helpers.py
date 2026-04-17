@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from backend.services.stripe_webhook import (
+from backend.services.integrations.stripe import (
     _WebhookHandler,
     _support_reply_email_text,
     _support_reply_telegram_text,

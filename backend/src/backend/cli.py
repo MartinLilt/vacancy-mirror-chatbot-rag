@@ -10,13 +10,13 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any
 
-from backend.services.openai import OpenAIProfileNamingService
-from backend.services.postgres import (
+from backend.services.assistant.openai import OpenAIProfileNamingService
+from backend.services.data.postgres import (
     PostgresJobExportService,
 )
-from backend.services.stripe_webhook import StripeWebhookService
-from backend.services.assistant_infer_server import AssistantInferServer
-from backend.services.telegram_bot import TelegramBotService
+from backend.services.integrations.stripe import StripeWebhookService
+from backend.services.assistant.infer_server import AssistantInferServer
+from backend.services.bot.telegram import TelegramBotService
 
 
 def main() -> int:
@@ -363,7 +363,7 @@ def build_job_embeddings_command(
     args: argparse.Namespace,
 ) -> int:
     """Build job embeddings from normalized jobs."""
-    from backend.services.embeddings import (  # noqa: PLC0415
+    from backend.services.data.embeddings import (  # noqa: PLC0415
         LocalEmbeddingService,
     )
 
@@ -409,7 +409,7 @@ def build_job_embeddings_command(
 
 
 def build_job_embeddings_command_old(args: argparse.Namespace) -> int:
-    from backend.services.embeddings import (  # noqa: PLC0415
+    from backend.services.data.embeddings import (  # noqa: PLC0415
         LocalEmbeddingService,
     )
     input_path = Path(args.input)

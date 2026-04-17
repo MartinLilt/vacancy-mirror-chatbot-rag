@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from telegram.constants import ParseMode
 from telegram.ext import ConversationHandler
 
-from backend.services.telegram_bot import _escape_markdown_v2, sup_receive_email
+from backend.services.bot.telegram import _escape_markdown_v2, sup_receive_email
 
 
 class _DummyMessage:
@@ -63,8 +63,8 @@ class TelegramSupportEmailFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
-            patch("backend.services.telegram_bot.ChatwootSupportClient", return_value=fake_client),
-            patch("backend.services.telegram_bot._pin_support_ticket_message", new=AsyncMock()),
+            patch("backend.services.bot.telegram.ChatwootSupportClient", return_value=fake_client),
+            patch("backend.services.bot.telegram._pin_support_ticket_message", new=AsyncMock()),
         ):
             result = await sup_receive_email(update, context)
 

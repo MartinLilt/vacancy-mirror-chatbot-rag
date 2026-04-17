@@ -7,7 +7,7 @@ from unittest.mock import Mock
 from telegram.constants import ParseMode
 from telegram.ext import ConversationHandler
 
-from backend.services.telegram_bot import WAITING_QUERY, handle_search_query
+from backend.services.bot.telegram import WAITING_QUERY, handle_search_query
 
 
 class _DummyChat:

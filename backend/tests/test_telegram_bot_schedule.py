@@ -5,7 +5,7 @@ import unittest
 
 from telegram.constants import ParseMode
 
-from backend.services.telegram_bot import cmd_schedule
+from backend.services.bot.telegram import cmd_schedule
 
 
 class _DummyMessage:

@@ -37,8 +37,11 @@ class AssistantInferClient:
         question: str,
         history: list[dict[str, str]] | None = None,
         timeout_sec: float = 70.0,
-    ) -> tuple[str, str]:
-        """Request answer from replicas, cascading on failures."""
+    ) -> tuple[str, list[str]]:
+        """Request answer from replicas, cascading on failures.
+
+        Returns (answer, activated_branches).
+        """
         payload = {
             "question": question,
             "history": history or [],
@@ -59,8 +62,9 @@ class AssistantInferClient:
                     answer = str(parsed.get("answer", "")).strip()
                     if not answer:
                         raise RuntimeError("Remote infer returned empty answer")
-                    route = str(parsed.get("route", "simple")).strip() or "simple"
-                    return answer, route
+                    branches_raw = parsed.get("branches", [])
+                    branches = [str(b) for b in branches_raw] if isinstance(branches_raw, list) else []
+                    return answer, branches
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 continue

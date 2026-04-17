@@ -107,17 +107,37 @@ class OpenAIMarketAssistantService:
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY is required.")
 
-    def answer_market_question(self, *, question: str) -> str:
-        return self.generate_text(
-            system_prompt=(
-                "You are a freelance market assistant. "
-                "Give practical, concise, factual answers. "
-                "If data is uncertain, say so clearly. "
-                "Respond in English only."
-            ),
-            user_prompt=question.strip(),
-            temperature=0.4,
-        )
+    _SYSTEM_PROMPT = (
+        "You are a freelance market assistant. "
+        "Give practical, concise, factual answers. "
+        "If data is uncertain, say so clearly. "
+        "Respond in English only."
+    )
+
+    def answer_with_history(
+        self,
+        *,
+        question: str,
+        history: list[dict[str, str]] | None = None,
+    ) -> str:
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": self._SYSTEM_PROMPT},
+        ]
+        for msg in (history or [])[-9:]:
+            role = str(msg.get("role", "user")).strip().lower()
+            if role not in {"user", "assistant"}:
+                role = "user"
+            content = str(msg.get("content", "")).strip()
+            if content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": question.strip()})
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.4,
+        }
+        response = self._post_chat_completions(body)
+        return self._extract_message_content(response)
 
     def generate_text(
         self,

@@ -9,8 +9,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from backend.services.openai import OpenAIMarketAssistantService
-from backend.services.reasoning_orchestrator import ReasoningOrchestrator
+from backend.services.assistant.knowledge_branch import KnowledgeBranchHandler
+from backend.services.assistant.openai import OpenAIMarketAssistantService
+from backend.services.assistant.orchestrator import Branch, InitOrchestrator, ResultOrchestrator
+from backend.services.assistant.simple_branch import SimpleBranchHandler
+from backend.services.assistant.statistics_branch import StatisticsBranchHandler
 
 log = logging.getLogger(__name__)
 
@@ -30,13 +33,13 @@ class AssistantInferServer:
             os.environ.get("ASSISTANT_INFER_MAX_CONCURRENCY", "24")
         )
         self.assistant = OpenAIMarketAssistantService()
-        self.orchestrator_enabled = (
-            os.environ.get("ASSISTANT_ORCHESTRATOR_ENABLED", "1").strip().lower()
-            not in {"0", "false", "no", "off"}
-        )
-        self.orchestrator: ReasoningOrchestrator | None = None
-        if self.orchestrator_enabled:
-            self.orchestrator = ReasoningOrchestrator(llm=self.assistant)
+        self.init_orchestrator = InitOrchestrator(llm=self.assistant)
+        self.result_orchestrator = ResultOrchestrator(llm=self.assistant)
+        self.branch_handlers = {
+            Branch.KNOWLEDGE: KnowledgeBranchHandler(llm=self.assistant),
+            Branch.STATISTICS: StatisticsBranchHandler(llm=self.assistant),
+            Branch.SIMPLE: SimpleBranchHandler(llm=self.assistant),
+        }
         self._semaphore = threading.BoundedSemaphore(max(1, self.max_concurrency))
 
     def run(self) -> None:
@@ -86,7 +89,7 @@ class AssistantInferServer:
                     history_raw = payload.get("history", [])
                     history: list[dict[str, str]] = []
                     if isinstance(history_raw, list):
-                        for item in history_raw[-8:]:
+                        for item in history_raw[-9:]:
                             if not isinstance(item, dict):
                                 continue
                             role = str(item.get("role", "user")).strip().lower()
@@ -97,23 +100,24 @@ class AssistantInferServer:
                                 continue
                             history.append({"role": role, "content": content})
 
-                    route = "simple"
-                    if server_ref.orchestrator is not None:
-                        result = server_ref.orchestrator.run(
-                            question=question,
-                            history=history,
-                        )
-                        answer = result.final_answer
-                        route = result.route
-                    else:
-                        answer = server_ref.assistant.answer_market_question(
-                            question=question,
-                        )
-
+                    routing = server_ref.init_orchestrator.route(
+                        question=question,
+                        history=history,
+                    )
+                    branch_results = server_ref.init_orchestrator.execute(
+                        routing,
+                        question=question,
+                        history=history,
+                        branch_handlers=server_ref.branch_handlers,
+                    )
+                    answer = server_ref.result_orchestrator.synthesize(
+                        question=question,
+                        results=branch_results,
+                    )
                     self._json(200, {
                         "ok": True,
                         "answer": answer,
-                        "route": route,
+                        "branches": [r.branch.value for r in branch_results if r.success],
                     })
                 except Exception as exc:  # noqa: BLE001
                     self._json(500, {"ok": False, "error": str(exc)})
