@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from backend.services.chatwoot_client import ChatwootSupportClient
+from backend.services.integrations.chatwoot import ChatwootSupportClient
 
 
 class _FakeChatwootClient(ChatwootSupportClient):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from backend.services.assistant_infer_client import AssistantInferClient
+from backend.services.assistant.infer_client import AssistantInferClient
 
 
 class AssistantInferClientTest(unittest.TestCase):
@@ -41,7 +41,7 @@ class AssistantInferClientTest(unittest.TestCase):
                 raise OSError("first replica down")
             return _Resp('{"answer":"ok","route":"fast_path"}')
 
-        with patch("backend.services.assistant_infer_client.request.urlopen", side_effect=_fake_urlopen):
+        with patch("backend.services.assistant.infer_client.request.urlopen", side_effect=_fake_urlopen):
             answer, route = client.generate_answer(question="q", history=[])
 
         self.assertEqual(answer, "ok")

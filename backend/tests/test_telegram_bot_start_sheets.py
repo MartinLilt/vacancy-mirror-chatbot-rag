@@ -6,8 +6,8 @@ from unittest.mock import Mock
 
 from telegram.constants import ParseMode
 
-from backend.services import telegram_bot
-from backend.services.telegram_bot import cmd_start
+from backend.services.bot import telegram as telegram_bot
+from backend.services.bot.telegram import cmd_start
 
 
 class _DummyMessage:
