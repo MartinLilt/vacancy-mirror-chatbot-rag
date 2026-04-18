@@ -18,7 +18,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+import time
+from datetime import datetime, date, timezone
 from typing import Any
 
 import gspread
@@ -39,7 +40,19 @@ _HEADERS: list[str] = [
     "stripe_subscription_id",
     "first_seen",
     "last_updated",
+    "banned_until",
+    "banned_since",
+    "muted_until",
+    "muted_since",
 ]
+
+# Columns managed by admin (banned_until, muted_until) or auto-set once by bot
+# (banned_since, muted_since). Never overwrite during regular user upserts.
+_BAN_MUTE_PRESERVE_COLS = frozenset({
+    "banned_until", "banned_since", "muted_until", "muted_since"
+})
+
+_BAN_MUTE_CACHE_TTL = 60.0  # seconds
 
 _SHEET_NAME = "Users"
 
@@ -55,6 +68,10 @@ _COL_WIDTHS: dict[str, int] = {
     "stripe_subscription_id": 220,
     "first_seen":             180,
     "last_updated":           180,
+    "banned_until":           130,
+    "banned_since":           130,
+    "muted_until":            130,
+    "muted_since":            130,
 }
 
 
@@ -93,6 +110,7 @@ class GoogleSheetsService:
         self._credentials_source: str = str(raw_credentials_source).strip().strip('"').strip("'")
         self._client: gspread.Client | None = None
         self._missing_config_logged = False
+        self._ban_mute_cache: dict[int, tuple[float, dict]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -144,6 +162,45 @@ class GoogleSheetsService:
             self._write_all(sheet, rows)
         except Exception as exc:  # noqa: BLE001
             log.warning("Google Sheets full sync failed: %s", exc)
+
+    def get_ban_mute_status(self, telegram_user_id: int) -> dict:
+        """Return ban/mute status for a user (cached 60 s).
+
+        Keys: banned, banned_until, banned_since, muted, muted_until, muted_since.
+        On any error returns all-False/empty so the bot stays responsive.
+        """
+        empty: dict = {
+            "banned": False, "banned_until": "", "banned_since": "",
+            "muted": False, "muted_until": "", "muted_since": "",
+        }
+        if not self._is_configured():
+            return empty
+        now = time.monotonic()
+        cached = self._ban_mute_cache.get(telegram_user_id)
+        if cached and (now - cached[0]) < _BAN_MUTE_CACHE_TTL:
+            return cached[1]
+        try:
+            result = self._fetch_ban_mute(telegram_user_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "get_ban_mute_status failed for user %s: %s",
+                telegram_user_id, exc,
+            )
+            return empty
+        self._ban_mute_cache[telegram_user_id] = (now, result)
+        return result
+
+    def write_ban_since(self, telegram_user_id: int, since: str) -> bool:
+        """Write banned_since for a user and invalidate cache."""
+        ok = self._write_single_cell(telegram_user_id, "banned_since", since)
+        self._ban_mute_cache.pop(telegram_user_id, None)
+        return ok
+
+    def write_mute_since(self, telegram_user_id: int, since: str) -> bool:
+        """Write muted_since for a user and invalidate cache."""
+        ok = self._write_single_cell(telegram_user_id, "muted_since", since)
+        self._ban_mute_cache.pop(telegram_user_id, None)
+        return ok
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -508,9 +565,23 @@ class GoogleSheetsService:
                 row_index = i
                 break
 
-        values = self._row_to_values(user_row)
+        # Preserve admin-managed ban/mute columns from the existing row.
+        merged_row = dict(user_row)
         if row_index is not None:
-            # Update only changed columns to save quota.
+            existing_data = existing[row_index - 1]
+            for col_name in _BAN_MUTE_PRESERVE_COLS:
+                if col_name in merged_row:
+                    continue  # caller explicitly provided it
+                try:
+                    idx = header_row.index(col_name)
+                    merged_row[col_name] = (
+                        existing_data[idx] if idx < len(existing_data) else ""
+                    )
+                except ValueError:
+                    pass
+
+        values = self._row_to_values(merged_row)
+        if row_index is not None:
             col_count = len(_HEADERS)
             range_name = (
                 f"A{row_index}:"
@@ -543,6 +614,81 @@ class GoogleSheetsService:
                 user_id,
             )
 
+    def _fetch_ban_mute(self, telegram_user_id: int) -> dict:
+        """Read ban/mute columns from the sheet for one user."""
+        empty: dict = {
+            "banned": False, "banned_until": "", "banned_since": "",
+            "muted": False, "muted_until": "", "muted_since": "",
+        }
+        sheet = self._get_sheet()
+        rows = sheet.get_all_values()
+        if not rows:
+            return empty
+        header = rows[0]
+
+        def _col(row: list[str], name: str) -> str:
+            try:
+                idx = header.index(name)
+                return row[idx] if idx < len(row) else ""
+            except ValueError:
+                return ""
+
+        user_id_str = str(telegram_user_id)
+        try:
+            id_idx = header.index("telegram_user_id")
+        except ValueError:
+            return empty
+
+        today = datetime.now(tz=timezone.utc).date()
+        for row in rows[1:]:
+            if id_idx >= len(row) or row[id_idx] != user_id_str:
+                continue
+            banned_until = _col(row, "banned_until")
+            banned_since = _col(row, "banned_since")
+            muted_until = _col(row, "muted_until")
+            muted_since = _col(row, "muted_since")
+            return {
+                "banned": _is_active_until(banned_until, today),
+                "banned_until": banned_until,
+                "banned_since": banned_since,
+                "muted": _is_active_until(muted_until, today),
+                "muted_until": muted_until,
+                "muted_since": muted_since,
+            }
+        return empty
+
+    def _write_single_cell(
+        self,
+        telegram_user_id: int,
+        col_name: str,
+        value: str,
+    ) -> bool:
+        """Update one cell in the user's row without touching other columns."""
+        if not self._is_configured():
+            return False
+        try:
+            sheet = self._get_sheet()
+            rows = sheet.get_all_values()
+            if not rows:
+                return False
+            header = rows[0]
+            try:
+                id_idx = header.index("telegram_user_id")
+                col_idx = header.index(col_name)
+            except ValueError:
+                return False
+            user_id_str = str(telegram_user_id)
+            for i, row in enumerate(rows[1:], start=2):
+                if id_idx < len(row) and row[id_idx] == user_id_str:
+                    sheet.update_cell(i, col_idx + 1, value)
+                    return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "_write_single_cell failed col=%s user=%s: %s",
+                col_name, telegram_user_id, exc,
+            )
+        return False
+
     def _write_all(
         self,
         sheet: Worksheet,
@@ -562,6 +708,25 @@ class GoogleSheetsService:
             "Full sync wrote %d user rows to Google Sheets.",
             len(rows),
         )
+
+
+def _parse_date(value: str) -> date | None:
+    """Parse a date string written by admin in Sheets (YYYY-MM-DD or DD.MM.YYYY)."""
+    value = value.strip()
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _is_active_until(value: str, today: date) -> bool:
+    """Return True if the date string is today or in the future."""
+    d = _parse_date(value)
+    return d is not None and d >= today
 
 
 def _now_iso() -> str:

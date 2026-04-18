@@ -690,6 +690,67 @@ async def trial_receive_query(
         return TRIAL_WAITING_QUERY
 
     db: PostgresJobExportService = context.bot_data["db"]
+    gs: GoogleSheetsService = context.bot_data["sheets"]
+
+    # -- Registration gate ------------------------------------------------
+    try:
+        if not db.bot_user_exists(user.id):
+            await update.message.reply_text(
+                "Please press /start first to use the bot.",
+                **reply_kwargs,
+            )
+            return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        log.warning("bot_user_exists check failed for user %s: %s", user.id, exc)
+        # DB unavailable — fail open to keep bot responsive
+    # -- End registration gate --------------------------------------------
+
+    # -- Ban / mute gate --------------------------------------------------
+    loop = asyncio.get_event_loop()
+    ban_status = await loop.run_in_executor(None, gs.get_ban_mute_status, user.id)
+
+    if ban_status["banned"]:
+        today_count = db.count_ban_mute_notifications_today(user.id, "ban")
+        if today_count < 3:
+            db.insert_ban_mute_notification(user.id, "ban")
+            if not ban_status["banned_since"]:
+                today_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+                loop.run_in_executor(None, gs.write_ban_since, user.id, today_str)
+            until = ban_status["banned_until"] or "an unspecified date"
+            await update.message.reply_text(
+                f"🚫 Your account is blocked until *{until}*\\.\n"
+                "If you think this is a mistake, please contact support\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                **reply_kwargs,
+            )
+        return TRIAL_WAITING_QUERY
+
+    if ban_status["muted"]:
+        muted_plan = "free"
+        try:
+            sub = db.get_subscription(user.id)
+            if sub and sub.get("status") == "active":
+                muted_plan = str(sub.get("plan", "free"))
+        except Exception:  # noqa: BLE001
+            pass
+        if muted_plan == "free":
+            today_count = db.count_ban_mute_notifications_today(user.id, "mute")
+            if today_count < 3:
+                db.insert_ban_mute_notification(user.id, "mute")
+                if not ban_status["muted_since"]:
+                    today_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+                    loop.run_in_executor(None, gs.write_mute_since, user.id, today_str)
+                until = ban_status["muted_until"] or "an unspecified date"
+                await update.message.reply_text(
+                    f"🔇 Your account is muted until *{until}*\\.\n"
+                    "Upgrade to Plus or Pro to continue using the assistant\\.",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    **reply_kwargs,
+                )
+            return TRIAL_WAITING_QUERY
+        # paid plan → mute does not apply, fall through
+    # -- End ban / mute gate ----------------------------------------------
+
     assistant: OpenAIMarketAssistantService = context.bot_data[
         "assistant_llm"
     ]
