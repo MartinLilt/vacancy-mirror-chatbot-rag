@@ -1,4 +1,4 @@
-net, """Assistant knowledge sections and deterministic section retrieval."""
+"""Assistant knowledge sections and deterministic section retrieval."""
 
 from __future__ import annotations
 
